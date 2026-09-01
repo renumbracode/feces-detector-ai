@@ -1,0 +1,4 @@
+## ESP component manager manifest
+## Pull the esp32-camera driver (required for OV3660 capture)
+dependencies:
+  espressif/esp32-camera: "^2.0.0"

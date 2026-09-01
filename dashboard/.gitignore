@@ -1,0 +1,5 @@
+application/cache/*
+application/logs/*
+!application/logs/index.html
+!application/cache/index.html
+system/

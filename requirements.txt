@@ -1,0 +1,13 @@
+# Python deps for the *server + training* halves of the hybrid system.
+#
+#  - server/yolo_verify/  (YOLOv8 verification server)
+#  - training/            (YOLOv8 training + evaluation)
+#
+# The ESP32-S3 edge device does NOT use these — it runs ESP-IDF firmware.
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pillow>=10.0.0
+python-multipart>=0.0.9

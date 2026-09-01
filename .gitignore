@@ -1,0 +1,37 @@
+# Dataset media (keep the .gitkeep placeholders)
+dataset/images/train/*
+dataset/images/val/*
+dataset/labels/train/*
+dataset/labels/val/*
+!dataset/images/train/.gitkeep
+!dataset/images/val/.gitkeep
+!dataset/labels/train/.gitkeep
+!dataset/labels/val/.gitkeep
+
+# Training artifacts
+training/runs/*
+!training/runs/.gitkeep
+training/*.zip
+dataset/*.zip
+training/*.json
+training/fomo/out_fomo/*
+!training/fomo/out_fomo/.gitkeep
+*.pt
+
+# ESP32-S3 firmware build artifacts
+firmware/esp32s3_fomo/build/
+firmware/esp32s3_fomo/sdkconfig*
+firmware/esp32s3_fomo/managed_components/
+firmware/esp32s3_fomo/dependencies.lock
+firmware/esp32s3_fomo/components/inference/edge_impulse/*
+!firmware/esp32s3_fomo/components/inference/edge_impulse/.gitkeep
+!firmware/esp32s3_fomo/components/inference/edge_impulse/README.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors / tooling
+.vscode/
+.idea/

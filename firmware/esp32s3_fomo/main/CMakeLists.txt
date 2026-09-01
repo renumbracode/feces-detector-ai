@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "esp32s3_fomo_main.c"
+    INCLUDE_DIRS
+        "include"
+        "../components/app_config/include"
+        "../components/wifi_service/include"
+        "../components/camera/include"
+        "../components/inference/include"
+        "../components/spray/include"
+        "../components/http_server/include"
+        "../components/detection_service/include"
+    PRIV_REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        esp_timer
+        freertos
+        esp_system
+        esp32_camera
+        app_config
+        wifi_service
+        camera
+        inference
+        spray
+        http_server
+        detection_service
+)
