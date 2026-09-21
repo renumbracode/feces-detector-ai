@@ -7,7 +7,8 @@
  *   GET /status           JSON status (heap, spray, fps, detections, ...)
  *   GET /spray?duration=  manual override spray
  *   GET /config           JSON current config
- *   POST /config          update threshold/cooldown/spray from dashboard
+ *   POST /config          update wifi/urls/threshold/cooldown/spray then reboot
+ *   GET /setup            HTML form that POSTs to /config (network switching)
  *
  * The connection handler for /stream runs with a shared frame buffer so the
  * camera task can keep feeding frames; the MJPEG boundary is standard.
@@ -51,7 +52,8 @@ static const char INDEX_HTML[] =
     "(point a browser or the dashboard live view at this)"
     "</li><li><a href=\"/status\">/status</a> — JSON status</li>"
     "<li><a href=\"/spray?duration=3000\">/spray?duration=3000</a> — manual spray</li>"
-    "<li><a href=\"/config\">/config</a> — device config</li></ul>"
+    "<li><a href=\"/config\">/config</a> — device config</li>"
+    "<li><a href=\"/setup\">/setup</a> — change Wi-Fi / server URLs</li></ul>"
     "</body></html>";
 
 static esp_err_t handler_index(httpd_req_t *req)
@@ -76,14 +78,14 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"lastConfidence\":%.4f,\"objectPresent\":%s,"
         "\"lastSprayAgoMs\":%llu,\"uptimeS\":%llu,"
         "\"inferenceMs\":%u,\"detections\":0}",
-        wifi_ip_str(), free_sram,
+        wifi_ip_str(), (unsigned)free_sram,
         sp.spraying ? "true" : "false",
         sp.cooldown_active ? "true" : "false",
         (double)sp.last_confidence,
         last.object_present ? "true" : "false",
         (unsigned long long)sp.last_spray_ago_ms,
         (unsigned long long)(esp_timer_get_time() / 1000000u),
-        last.inference_ms);
+        (unsigned)last.inference_ms);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
@@ -124,6 +126,118 @@ static esp_err_t handler_config(httpd_req_t *req)
     return httpd_resp_send(req, buf, n);
 }
 
+static esp_err_t prv_read_body(httpd_req_t *req, char *buf, size_t size)
+{
+    int total = 0;
+    while (total < (int)size - 1) {
+        int r = httpd_req_recv(req, buf + total, size - 1 - (size_t)total);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            break;
+        }
+        total += r;
+    }
+    buf[total] = '\0';
+    return total > 0 ? ESP_OK : ESP_FAIL;
+}
+
+/* POST /config — persist runtime settings to NVS then reboot.
+ * Body is URL-encoded key=value pairs (form or query string), e.g.
+ *   wifi_ssid, wifi_pass, verify_url, dash_url, threshold,
+ *   cooldown_ms, spray_ms.
+ * This is how the device is pointed at a different Wi-Fi/server without
+ * recompiling: save here, connect a browser to /setup on the current
+ * network, submit, and the board boots into the new network. */
+static esp_err_t handler_config_post(httpd_req_t *req)
+{
+    char body[1024];
+    if (prv_read_body(req, body, sizeof(body)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_OK;
+    }
+
+    app_config_t cfg;
+    app_config_load(&cfg);
+
+    char val[270];
+    if (httpd_query_key_value(body, "wifi_ssid", val, sizeof(val)) == ESP_OK && val[0]) {
+        strncpy(cfg.wifi_ssid, val, sizeof(cfg.wifi_ssid) - 1);
+        cfg.wifi_ssid[sizeof(cfg.wifi_ssid) - 1] = '\0';
+    }
+    if (httpd_query_key_value(body, "wifi_pass", val, sizeof(val)) == ESP_OK) {
+        strncpy(cfg.wifi_pass, val, sizeof(cfg.wifi_pass) - 1);
+        cfg.wifi_pass[sizeof(cfg.wifi_pass) - 1] = '\0';
+    }
+    if (httpd_query_key_value(body, "verify_url", val, sizeof(val)) == ESP_OK && val[0]) {
+        strncpy(cfg.verify_url, val, sizeof(cfg.verify_url) - 1);
+        cfg.verify_url[sizeof(cfg.verify_url) - 1] = '\0';
+    }
+    if (httpd_query_key_value(body, "dash_url", val, sizeof(val)) == ESP_OK && val[0]) {
+        strncpy(cfg.dash_url, val, sizeof(cfg.dash_url) - 1);
+        cfg.dash_url[sizeof(cfg.dash_url) - 1] = '\0';
+    }
+    if (httpd_query_key_value(body, "threshold", val, sizeof(val)) == ESP_OK) {
+        float t = strtof(val, NULL);
+        if (t >= 0.0f && t <= 1.0f) cfg.threshold = t;
+    }
+    if (httpd_query_key_value(body, "cooldown_ms", val, sizeof(val)) == ESP_OK) {
+        cfg.cooldown_ms = (uint32_t)strtoul(val, NULL, 10);
+    }
+    if (httpd_query_key_value(body, "spray_ms", val, sizeof(val)) == ESP_OK) {
+        cfg.spray_ms = (uint32_t)strtoul(val, NULL, 10);
+    }
+
+    app_config_save(&cfg);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"saved\":true,\"restarting\":true}");
+
+    ESP_LOGI(TAG, "Config updated via POST /config, restarting to apply");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+    return ESP_OK; /* not reached */
+}
+
+/* GET /setup — dependency-free HTML form for switching network/server config. */
+static esp_err_t handler_setup(httpd_req_t *req)
+{
+    app_config_t cfg;
+    app_config_load(&cfg);
+
+    char page[2048];
+    int n = snprintf(page, sizeof(page),
+        "<!doctype html><html><head><title>Feces Detector setup</title>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
+        "margin:40px;line-height:1.6}label{display:block;margin-top:12px;font-size:14px}"
+        "input{width:100%%;padding:8px;margin:6px 0;border-radius:6px;"
+        "border:1px solid #334155;background:#1e293b;color:#e2e8f0;box-sizing:border-box}"
+        "button{padding:10px 18px;border:0;border-radius:6px;background:#34d399;"
+        "color:#064e3b;font-weight:600;margin-top:16px}code{background:#1e293b;"
+        "padding:2px 6px}</style></head><body><h1>Feces Detector setup</h1>"
+        "<p>Saved settings apply after the board restarts (~15 s). If you change "
+        "the Wi-Fi, find the board's new IP in the router's DHCP/connected-device "
+        "list, or re-flash. Server URLs must be reachable from this board's network.</p>"
+        "<form method='post' action='/config'>"
+        "<label>Wi-Fi SSID</label><input name='wifi_ssid' value='%s' maxlength='32'>"
+        "<label>Wi-Fi password</label><input name='wifi_pass' value='%s' maxlength='64'>"
+        "<label>YOLOv8 verify URL</label><input name='verify_url' value='%s' maxlength='128'>"
+        "<label>Dashboard API URL</label><input name='dash_url' value='%s' maxlength='256'>"
+        "<label>Detection threshold (0..1)</label><input type='number' step='0.05' "
+        "name='threshold' value='%.2f' min='0' max='1'>"
+        "<label>Cooldown ms</label><input type='number' step='1000' name='cooldown_ms' "
+        "value='%u'>"
+        "<label>Spray duration ms</label><input type='number' step='100' name='spray_ms' "
+        "value='%u'>"
+        "<button type='submit'>Save &amp; restart</button></form>"
+        "</body></html>",
+        cfg.wifi_ssid, cfg.wifi_pass, cfg.verify_url, cfg.dash_url,
+        (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms);
+
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, page, n);
+}
+
 static esp_err_t handler_stream(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
@@ -162,11 +276,13 @@ static esp_err_t handler_stream(httpd_req_t *req)
 }
 
 static httpd_uri_t uris[] = {
-    { .uri = "/",       .method = HTTP_GET, .handler = handler_index,   .user_ctx = NULL },
-    { .uri = "/status", .method = HTTP_GET, .handler = handler_status,  .user_ctx = NULL },
-    { .uri = "/spray",  .method = HTTP_GET, .handler = handler_spray,   .user_ctx = NULL },
-    { .uri = "/config", .method = HTTP_GET, .handler = handler_config,  .user_ctx = NULL },
-    { .uri = "/stream", .method = HTTP_GET, .handler = handler_stream,  .user_ctx = NULL },
+    { .uri = "/",       .method = HTTP_GET,  .handler = handler_index,       .user_ctx = NULL },
+    { .uri = "/status", .method = HTTP_GET,  .handler = handler_status,      .user_ctx = NULL },
+    { .uri = "/spray",  .method = HTTP_GET,  .handler = handler_spray,       .user_ctx = NULL },
+    { .uri = "/config", .method = HTTP_GET,  .handler = handler_config,      .user_ctx = NULL },
+    { .uri = "/config", .method = HTTP_POST, .handler = handler_config_post, .user_ctx = NULL },
+    { .uri = "/setup",  .method = HTTP_GET,  .handler = handler_setup,       .user_ctx = NULL },
+    { .uri = "/stream", .method = HTTP_GET,  .handler = handler_stream,      .user_ctx = NULL },
 };
 
 static const char *wifi_ip_str(void)
@@ -187,13 +303,16 @@ esp_err_t http_server_service_init(void)
 
     httpd_config_t c = HTTPD_DEFAULT_CONFIG();
     c.lru_purge_enable = true;
-    c.max_uri_handlers = 8;
+    c.max_uri_handlers = 10;
 
     httpd_handle_t srv = NULL;
-    if (httpd_start(&srv, &c) == ESP_OK) {
-        for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-            httpd_register_uri_handler(srv, &uris[i]);
-        }
+    esp_err_t start = httpd_start(&srv, &c);
+    if (start != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(start));
+        return start;
+    }
+    for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
+        httpd_register_uri_handler(srv, &uris[i]);
     }
 
     ESP_LOGI(TAG, "HTTP server ready on port %u", c.server_port);

@@ -45,7 +45,7 @@ function set_setting(string $key, string $value): void
 
 function detector_url(string $path): string
 {
-    return 'http://' . get_setting('esp32_ip', '192.168.1.100') . $path;
+    return 'http://' . get_setting('esp32_ip', '192.168.1.39') . $path;
 }
 
 function esp_url(string $path): string

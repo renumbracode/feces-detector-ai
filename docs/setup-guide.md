@@ -66,6 +66,12 @@ idf.py -p COMx flash monitor
 See `firmware/esp32s3_fomo/README.md` for the full workflow, including how to
 insert your trained FOMO model.
 
+> **Switching Wi-Fi / server URLs at runtime (no reflash):** the ESP serves
+> `GET /setup` — open `http://<esp-ip>/setup` in a browser, change SSID,
+> password, verify URL, or dashboard URL, and the board saves them to NVS and
+> reboots into the new network. Find the board's new IP in the router's
+> connected-device list.
+
 ## 4. Train the models
 
 ### On-device FOMO (ESP32-S3)
@@ -109,6 +115,8 @@ python evaluate.py --model runs/detect/train/weights/best.pt   # target mAP50 >=
 |---|---|
 | No stream | Verify camera GPIO pins in `components/camera/camera_service.c`, check ESP32 is flashed |
 | Dashboard "Device unreachable" | Wrong `esp32_ip`/`esp32_port`, or ESP32 + PC on different LAN |
+| Ping/`/status` time out but ESP is online | **Router wireless/client (L2) isolation** blocks station↔station. Fix: connect the PC to the router via **Ethernet**, or disable "AP/client isolation" in the router admin at `http://192.168.1.1` (Wireless → Advanced/Professional → Isolate). The ESP can still POST to the server; only PC→ESP pull is blocked |
+| Need to change Wi-Fi/URLs | Open `http://<esp-ip>/setup` (no reflash), save, board reboots into the new network |
 | Verification empty | Python verify server not running; check `verify_url` in dashboard settings |
 | CI3 `system folder path` error | Drop the CodeIgniter 3 `system/` dir into `dashboard/` |
 | Database "table not found" | Run `dashboard/database.sql` import |

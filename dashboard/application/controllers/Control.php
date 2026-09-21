@@ -52,7 +52,7 @@ class Control extends MY_Controller
             'verifyUrl' => $this->verify_url(),
             'detectorBase' => $this->detector_url(''),
             'settings' => [
-                'esp32_ip'          => $this->Setting_model->get('esp32_ip', '192.168.1.100'),
+                'esp32_ip'          => $this->Setting_model->get('esp32_ip', '192.168.1.39'),
                 'esp_port'          => $this->Setting_model->get('esp_port', '80'),
                 'stream_url'        => $this->Setting_model->get('stream_url', ''),
                 'verify_url'        => $this->Setting_model->get('verify_url', ''),

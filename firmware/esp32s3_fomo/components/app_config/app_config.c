@@ -31,7 +31,10 @@ esp_err_t app_config_load(app_config_t *cfg)
     nvs_get_str(h, APP_VERIFY_URL_KEY, cfg->verify_url, &(size_t){ sizeof(cfg->verify_url) });
     nvs_get_str(h, APP_DASH_URL_KEY, cfg->dash_url, &(size_t){ sizeof(cfg->dash_url) });
 
-    nvs_get_f32(h, "threshold", &cfg->threshold);
+    {
+        size_t len = sizeof(cfg->threshold);
+        nvs_get_blob(h, "threshold", &cfg->threshold, &len);
+    }
     uint32_t u;
     if (nvs_get_u32(h, "cooldown_ms", &u) == ESP_OK) cfg->cooldown_ms = u;
     if (nvs_get_u32(h, "spray_ms", &u) == ESP_OK) cfg->spray_ms = u;
@@ -50,7 +53,7 @@ void app_config_save(const app_config_t *cfg)
     nvs_set_str(h, APP_WIFI_PASS_KEY, cfg->wifi_pass);
     nvs_set_str(h, APP_VERIFY_URL_KEY, cfg->verify_url);
     nvs_set_str(h, APP_DASH_URL_KEY, cfg->dash_url);
-    nvs_set_f32(h, "threshold", cfg->threshold);
+    nvs_set_blob(h, "threshold", &cfg->threshold, sizeof(cfg->threshold));
     nvs_set_u32(h, "cooldown_ms", cfg->cooldown_ms);
     nvs_set_u32(h, "spray_ms", cfg->spray_ms);
     nvs_commit(h);

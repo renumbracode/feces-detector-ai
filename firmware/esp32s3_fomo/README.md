@@ -71,10 +71,10 @@ Writable on first boot via `components/app_config` (NVS). Defaults:
 
 | Key | Default |
 |---|---|
-| `wifi_ssid` | `FecesDetectorAP` |
-| `wifi_pass` | _(empty)_ |
-| `verify_url` | `http://192.168.1.50:8000/verify` (Python YOLOv8 server) |
-| `dash_url` | `http://192.168.1.50/feces-detector-ai/dashboard/.../insert_detection.php` |
+| `wifi_ssid` | `REDACTED_SSID` |
+| `wifi_pass` | _(live network; change via `/setup`)_ |
+| `verify_url` | `http://192.168.1.3:8000/verify` (Python YOLOv8 server) |
+| `dash_url` | `http://192.168.1.3/feces-detector-ai/dashboard/.../insert_detection.php` |
 | `threshold` | `0.60` (min FOMO score to auto-spray) |
 | `cooldown_ms` | `300000` (5 min between auto sprays) |
 | `spray_ms` | `5000` (pump-on duration) |
@@ -87,6 +87,8 @@ Writable on first boot via `components/app_config` (NVS). Defaults:
 | `GET /status` | JSON: heap, spray, confidence, uptime, model, etc. |
 | `GET /spray?duration=` | Manual override (bypasses cooldown) |
 | `GET /config` | Current device configuration JSON |
+| `POST /config` | Save Wi-Fi/server/tuning settings to NVS and reboot (see `/setup`) |
+| `GET /setup` | Browser form to switch Wi-Fi / verify / dashboard URLs without reflashing |
 
 ## PIN mapping note
 

@@ -51,7 +51,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
         <div class="field">
           <label for="esp32_ip">Detector IP</label>
           <input id="esp32_ip" type="text" name="esp32_ip" value="<?= htmlspecialchars($settings['esp32_ip']) ?>">
-          <div class="hint">ESP32-S3 LAN IP (e.g. <code>192.168.1.100</code>)</div>
+          <div class="hint">ESP32-S3 LAN IP (e.g. <code>192.168.1.39</code>)</div>
         </div>
         <div class="field">
           <label for="esp_port">Detector port</label>
@@ -60,7 +60,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
         </div>
         <div class="field">
           <label for="stream_url">Stream URL</label>
-          <input id="stream_url" type="text" name="stream_url" value="<?= htmlspecialchars($settings['stream_url']) ?>" placeholder="http://192.168.1.100/stream">
+          <input id="stream_url" type="text" name="stream_url" value="<?= htmlspecialchars($settings['stream_url']) ?>" placeholder="http://192.168.1.39/stream">
           <div class="hint">Leave blank to use <code>http://&lt;ip&gt;/stream</code></div>
         </div>
         <div class="field">

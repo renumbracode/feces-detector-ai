@@ -53,34 +53,33 @@ static void prv_downscale_rgb(const uint8_t *src, int sw, int sh,
 }
 
 /* Decode a JPEG frame to RGB888 using the esp32-camera img2rgb. */
+static bool prv_jpeg_dims(const uint8_t *jpeg, size_t len, int *w, int *h)
+{
+    *w = 0; *h = 0;
+    if (len < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return false;
+    const uint8_t *p = jpeg + 2, *end = jpeg + len;
+    while (p + 9 < end) {
+        if (p[0] != 0xFF) { p++; continue; }
+        unsigned marker = p[1];
+        if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2) {
+            *h = (p[5] << 8) | p[6];
+            *w = (p[7] << 8) | p[8];
+            return true;
+        }
+        if (marker == 0xDA) break;
+        int seglen = (p[2] << 8) | p[3];
+        if (seglen < 2) break;
+        p += 2 + seglen;
+    }
+    return false;
+}
+
 static uint8_t *prv_decode_jpeg(const uint8_t *jpeg, size_t len, int *w, int *h)
 {
-    if (jpeg == NULL || len == 0) return NULL;
-    size_t decoded = 0;
-    uint8_t *rgb = NULL;
-    bool ok = fmt2rgb888(jpeg, len, PIXFORMAT_JPEG, &rgb, &decoded);
-    if (!ok || rgb == NULL) {
-        ESP_LOGW(TAG, "JPEG decode failed");
-        return NULL;
-    }
-    /* Infer dimensions from JPEG header. */
-    *w = 0; *h = 0;
-    if (len > 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8) {
-        const uint8_t *p = jpeg + 2;
-        while (p + 9 < jpeg + len) {
-            if (p[0] != 0xFF) { p++; continue; }
-            unsigned marker = p[1];
-            if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2) {
-                *h = (p[5] << 8) | p[6];
-                *w = (p[7] << 8) | p[8];
-                break;
-            }
-            if (marker == 0xDA) break;
-            int seglen = (p[2] << 8) | p[3];
-            p += 2 + seglen;
-        }
-    }
-    if (*w == 0 || *h == 0) {
+    if (!prv_jpeg_dims(jpeg, len, w, h) || *w == 0 || *h == 0) return NULL;
+    uint8_t *rgb = malloc((size_t)*w * *h * 3);
+    if (rgb == NULL) return NULL;
+    if (!fmt2rgb888(jpeg, len, PIXFORMAT_JPEG, rgb)) {
         free(rgb);
         return NULL;
     }

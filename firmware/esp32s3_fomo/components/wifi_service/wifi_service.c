@@ -48,13 +48,17 @@ esp_err_t wifi_service_start(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &prv_event, NULL));
 
     wifi_config_t wf = { 0 };
-    strncpy((char *)wf.sta.ssid, cfg.wifi_ssid, sizeof(wf.sta.ssid) - 1);
-    strncpy((char *)wf.sta.password, cfg.wifi_pass, sizeof(wf.sta.password) - 1);
+    memcpy(wf.sta.ssid, cfg.wifi_ssid, sizeof(wf.sta.ssid) - 1);
+    memcpy(wf.sta.password, cfg.wifi_pass, sizeof(wf.sta.password) - 1);
     wf.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wf));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* Keep the radio always on: the dashboard + verify server must be able
+     * to reach /stream and /status at any time. Modem-sleep makes the STA
+     * unresponsive on the LAN (dropped ARP/TCP). */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     ESP_LOGI(TAG, "Connecting to SSID: %s", cfg.wifi_ssid);
 

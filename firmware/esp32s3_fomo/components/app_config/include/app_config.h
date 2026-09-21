@@ -8,10 +8,10 @@
 #define APP_VERIFY_URL_KEY "verify_url"
 #define APP_DASH_URL_KEY "dash_url"
 
-#define APP_DEFAULT_WIFI_SSID "FecesDetectorAP"
-#define APP_DEFAULT_WIFI_PASS ""
-#define APP_DEFAULT_VERIFY_URL "http://192.168.1.50:8000/verify"
-#define APP_DEFAULT_DASH_URL "http://192.168.1.50/feces-detector-ai/dashboard/api/insert_detection.php"
+#define APP_DEFAULT_WIFI_SSID "REDACTED_SSID"
+#define APP_DEFAULT_WIFI_PASS "REDACTED_PASS"
+#define APP_DEFAULT_VERIFY_URL "http://192.168.1.3:8000/verify"
+#define APP_DEFAULT_DASH_URL "http://192.168.1.3/feces-detector-ai/dashboard/api/insert_detection.php"
 
 #define APP_PIN_RELAY 4        /* GPIO driving the relay / water pump */
 #define APP_PIN_LED 2          /* on-board status LED (flash LED on some boards) */

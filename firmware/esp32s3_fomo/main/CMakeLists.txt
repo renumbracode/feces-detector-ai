@@ -2,7 +2,6 @@ idf_component_register(
     SRCS
         "esp32s3_fomo_main.c"
     INCLUDE_DIRS
-        "include"
         "../components/app_config/include"
         "../components/wifi_service/include"
         "../components/camera/include"
@@ -19,7 +18,7 @@ idf_component_register(
         esp_timer
         freertos
         esp_system
-        esp32_camera
+        espressif__esp32-camera
         app_config
         wifi_service
         camera

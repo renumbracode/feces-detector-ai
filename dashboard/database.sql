@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 INSERT INTO settings (`key`, `value`) VALUES
-    ('esp32_ip', '192.168.1.100'),          -- ESP32-S3 address (was the old Pi)
+    ('esp32_ip', '192.168.1.39'),          -- ESP32-S3 address (was the old Pi)
     ('esp_port', '80'),
     ('stream_url', ''),
     ('verify_url', 'http://localhost:8000/verify'),  -- Python YOLOv8 server

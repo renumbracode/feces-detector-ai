@@ -86,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <div class="form-grid">
         <div class="field">
           <label for="esp32_ip">Detector IP</label>
-          <input id="esp32_ip" type="text" name="esp32_ip" value="<?= htmlspecialchars(get_setting('esp32_ip', '192.168.1.100')) ?>">
+          <input id="esp32_ip" type="text" name="esp32_ip" value="<?= htmlspecialchars(get_setting('esp32_ip', '192.168.1.39')) ?>">
           <div class="hint">Raspberry Pi IP (e.g. <code>192.168.1.50</code> or <code>raspberrypi.local</code>)</div>
         </div>
         <div class="field">

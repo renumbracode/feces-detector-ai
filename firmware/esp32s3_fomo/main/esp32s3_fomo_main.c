@@ -10,7 +10,7 @@
  *   - Reporting to CodeIgniter dashboard + Python YOLOv8 verifier
  *
  * The inference task runs on core 1 while camera capture + MJPEG
- * streaming runs on core 0. See components/* for the detail.
+ * streaming runs on core 0. See components/ for the detail.
  */
 #include <string.h>
 #include <stdlib.h>

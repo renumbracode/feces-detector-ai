@@ -9,7 +9,7 @@ class MY_Controller extends CI_Controller
 {
     protected function detector_url($path = '')
     {
-        $ip = $this->Setting_model->get('esp32_ip', '192.168.1.100');
+        $ip = $this->Setting_model->get('esp32_ip', '192.168.1.39');
         $port = $this->Setting_model->get('esp_port', '80');
         $base = 'http://' . $ip . ($port !== '80' ? ':' . $port : '');
         return $base . $path;
