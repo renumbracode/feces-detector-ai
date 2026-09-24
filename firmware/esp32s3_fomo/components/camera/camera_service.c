@@ -29,7 +29,7 @@ static const char *TAG = "camera_svc";
 #define CAM_PIN_PCLK    13
 
 #define CAM_XCLK_FREQ_HZ 20000000
-#define CAM_FRAMESIZE    FRAMESIZE_UXGA   /* 1600x1200 max; we downscale for ML */
+#define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720: light MJPEG, enough for AI input */
 
 static volatile bool s_streaming = false;
 
@@ -58,7 +58,7 @@ esp_err_t camera_service_init(void)
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = CAM_FRAMESIZE,
         .jpeg_quality = 12,
-        .fb_count = 2,
+        .fb_count = 4,              /* enough for MJPEG stream + detect task consumers */
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
     };

@@ -97,15 +97,30 @@ static void detection_task(void *arg)
         fomo_result_t res = inference_service_classify(fb->buf, fb->len);
         bool triggered = spray_controller_on_detection(res.score);
 
-        if (res.object_present && (frame_counter % 5 == 0)) {
-            app_config_t cfg;
-            app_config_load(&cfg);
-            prv_post_dashboard(&cfg, res.score, triggered, cfg.spray_ms);
-            /* Push every Nth detected frame to YOLOv8 verifier. */
-            prv_post_verify(&cfg, fb->buf, fb->len, res.score);
+        app_config_t cfg;
+        app_config_load(&cfg);
+        /* Report/publish whenever the FOMO confidence beats the configured
+         * threshold (an object is "present" at the threshold the user set),
+         * throttled to every Nth frame. */
+        if ((res.object_present || res.score >= cfg.threshold) &&
+            (frame_counter % 5 == 0)) {
+            /* Copy the JPEG so we can release the camera buffer BEFORE doing
+             * network I/O; holding the frame during an HTTP POST (up to 15 s
+             * on a timeout) would starve the MJPEG stream of buffers. */
+            uint8_t *shot = malloc(fb->len);
+            if (shot) {
+                memcpy(shot, fb->buf, fb->len);
+                size_t shot_len = fb->len;
+                camera_service_release_frame(fb);
+                prv_post_dashboard(&cfg, res.score, triggered, cfg.spray_ms);
+                prv_post_verify(&cfg, shot, shot_len, res.score);
+                free(shot);
+            } else {
+                camera_service_release_frame(fb);
+            }
+        } else {
+            camera_service_release_frame(fb);
         }
-
-        camera_service_release_frame(fb);
         frame_counter++;
         vTaskDelay(pdMS_TO_TICKS(100)); /* ~10 fps detection cadence */
     }

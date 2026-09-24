@@ -40,6 +40,15 @@ uint64_t g_start_us;
 
 static const char *wifi_ip_str(void);
 
+/* Allow cross-origin browser clients (the CodeIgniter dashboard pages fetch
+ * /status and /spray directly from a different host/port). */
+static void prv_cors(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+}
+
+static const char *wifi_ip_str(void);
+
 static const char INDEX_HTML[] =
     "<!doctype html><html><head><title>ESP32-S3 Feces Detector</title>"
     "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
@@ -58,12 +67,14 @@ static const char INDEX_HTML[] =
 
 static esp_err_t handler_index(httpd_req_t *req)
 {
+    prv_cors(req);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t handler_status(httpd_req_t *req)
 {
+    prv_cors(req);
     spray_status_t sp;
     spray_controller_status(&sp);
 
@@ -93,6 +104,7 @@ static esp_err_t handler_status(httpd_req_t *req)
 
 static esp_err_t handler_spray(httpd_req_t *req)
 {
+    prv_cors(req);
     char buf[16] = "0";
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         char dur[16] = "0";
@@ -113,6 +125,7 @@ static esp_err_t handler_spray(httpd_req_t *req)
 
 static esp_err_t handler_config(httpd_req_t *req)
 {
+    prv_cors(req);
     app_config_t cfg;
     app_config_load(&cfg);
 
@@ -150,6 +163,7 @@ static esp_err_t prv_read_body(httpd_req_t *req, char *buf, size_t size)
  * network, submit, and the board boots into the new network. */
 static esp_err_t handler_config_post(httpd_req_t *req)
 {
+    prv_cors(req);
     char body[1024];
     if (prv_read_body(req, body, sizeof(body)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
@@ -201,11 +215,16 @@ static esp_err_t handler_config_post(httpd_req_t *req)
 /* GET /setup — dependency-free HTML form for switching network/server config. */
 static esp_err_t handler_setup(httpd_req_t *req)
 {
+    prv_cors(req);
     app_config_t cfg;
     app_config_load(&cfg);
 
-    char page[2048];
-    int n = snprintf(page, sizeof(page),
+    char *page = malloc(2048);
+    if (page == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+    int n = snprintf(page, 2048,
         "<!doctype html><html><head><title>Feces Detector setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
@@ -235,11 +254,14 @@ static esp_err_t handler_setup(httpd_req_t *req)
         (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms);
 
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, page, n);
+    httpd_resp_send(req, page, n);
+    free(page);
+    return ESP_OK;
 }
 
 static esp_err_t handler_stream(httpd_req_t *req)
 {
+    prv_cors(req);
     httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
     camera_streaming_start();
 
@@ -251,25 +273,21 @@ static esp_err_t handler_stream(httpd_req_t *req)
             continue;
         }
 
-        /* Run FOMO on the frame (camera side). Real deployments often do
-         * this on a dedicated core; here we call synchronously for simplicity. */
-        fomo_result_t res = inference_service_classify(fb->buf, fb->len);
-
         httpd_resp_send_chunk(req, "--" STREAM_BOUNDARY "\r\n", HTTPD_RESP_USE_STRLEN);
         int h = snprintf(part_hdr, sizeof(part_hdr), STREAM_PART, (unsigned)fb->len);
-        httpd_resp_send_chunk(req, part_hdr, h);
-        httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-        httpd_resp_send_chunk(req, "\r\n", 2);
+        esp_err_t res = httpd_resp_send_chunk(req, part_hdr, h);
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        }
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, "\r\n", 2);
+        }
         camera_service_release_frame(fb);
 
-        vTaskDelay(pdMS_TO_TICKS(60)); /* ~16 fps target */
-
-        if (httpd_resp_send_chunk(req, NULL, 0) != ESP_OK) {
-            break; /* client disconnected */
+        if (res != ESP_OK) {
+            break; /* client disconnected or send failed */
         }
-
-        /* Optional: trigger spray from detection inside stream handler. */
-        (void)res;
+        vTaskDelay(pdMS_TO_TICKS(40)); /* ~25 fps target; inference runs in detect task */
     }
     camera_streaming_stop();
     return ESP_OK;
@@ -304,6 +322,7 @@ esp_err_t http_server_service_init(void)
     httpd_config_t c = HTTPD_DEFAULT_CONFIG();
     c.lru_purge_enable = true;
     c.max_uri_handlers = 10;
+    c.stack_size = 8192; /* setup handler builds ~2 KB HTML on the task stack */
 
     httpd_handle_t srv = NULL;
     esp_err_t start = httpd_start(&srv, &c);

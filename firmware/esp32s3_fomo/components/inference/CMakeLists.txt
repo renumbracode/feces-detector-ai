@@ -4,7 +4,7 @@ idf_component_register(
         "edge_impulse_invoke.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
-    REQUIRES espressif__esp32-camera freertos esp_system esp_timer
+    REQUIRES espressif__esp32-camera espressif__esp_jpeg freertos esp_system esp_timer
 )
 
 ## Edge Impulse exports a ready-to-build library folder (with its own

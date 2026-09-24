@@ -6,7 +6,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "img_converters.h"
+#include "jpeg_decoder.h"
 #include "esp_camera.h"
 
 #include "inference_service.h"
@@ -74,15 +74,39 @@ static bool prv_jpeg_dims(const uint8_t *jpeg, size_t len, int *w, int *h)
     return false;
 }
 
+/* Decode a JPEG to a small RGB888 buffer using the SIMD-optimised esp_jpeg
+ * decoder with a 1/8 scale. The FOMO input is tiny (96x96), so decoding the
+ * full camera frame (1280x720) would be needlessly slow; scaling inside the
+ * decoder is ~64x cheaper and produces an equivalent input. Returns NULL on
+ * failure, setting w and h to the scaled output width and height. */
 static uint8_t *prv_decode_jpeg(const uint8_t *jpeg, size_t len, int *w, int *h)
 {
-    if (!prv_jpeg_dims(jpeg, len, w, h) || *w == 0 || *h == 0) return NULL;
-    uint8_t *rgb = malloc((size_t)*w * *h * 3);
+    int sw = 0, sh = 0;
+    if (!prv_jpeg_dims(jpeg, len, &sw, &sh) || sw == 0 || sh == 0) return NULL;
+
+    int ow = sw / 8, oh = sh / 8;
+    if (ow < 1) ow = 1;
+    if (oh < 1) oh = 1;
+
+    uint8_t *rgb = malloc((size_t)ow * oh * 3);
     if (rgb == NULL) return NULL;
-    if (!fmt2rgb888(jpeg, len, PIXFORMAT_JPEG, rgb)) {
+
+    esp_jpeg_image_cfg_t cfg = {
+        .indata = (uint8_t *)jpeg,
+        .indata_size = (uint32_t)len,
+        .outbuf = rgb,
+        .outbuf_size = (uint32_t)ow * oh * 3,
+        .out_format = JPEG_IMAGE_FORMAT_RGB888,
+        .out_scale = JPEG_IMAGE_SCALE_1_8,
+    };
+    esp_jpeg_image_output_t out = { 0 };
+    if (esp_jpeg_decode(&cfg, &out) != ESP_OK) {
         free(rgb);
         return NULL;
     }
+
+    *w = out.width;
+    *h = out.height;
     return rgb;
 }
 
