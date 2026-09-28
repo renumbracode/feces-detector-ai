@@ -52,7 +52,8 @@ static void prv_downscale_rgb(const uint8_t *src, int sw, int sh,
     }
 }
 
-/* Decode a JPEG frame to RGB888 using the esp32-camera img2rgb. */
+/* Parse JPEG dimensions from the SOF marker so we know the source size
+ * before esp_jpeg decodes (sensor frames are hardware-encoded JPEG). */
 static bool prv_jpeg_dims(const uint8_t *jpeg, size_t len, int *w, int *h)
 {
     *w = 0; *h = 0;

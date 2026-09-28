@@ -1,22 +1,21 @@
 /*
  * edge_impulse_invoke.c — runs the trained Edge Impulse FOMO model.
  *
- * Replace the stub below with your exported runtime in 3 steps:
+ * Wiring for the exported Edge Impulse library (see edge_impulse/README.md):
  *
  *   1. Edge Impulse project -> Deployment -> "ESP32 / ESP32-S3 C++ library"
- *      (or "Arduino library") download. Unzip it under:
- *          components/inference/edge_impulse/
- *   2. Make sure the export's include paths are visible. If you place the
- *      exported tree at edge_impulse/ with its own CMakeLists, add it to
- *      components/inference/CMakeLists.txt (idf_component_add includes).
- *   3. Uncomment/replace the body of edge_impulse_run_model() with the
- *      standard Edge Impulse SDK invocation:
+ *      download. Unzip it under:  components/inference/edge_impulse/
+ *   2. The export ships its own CMakeLists.txt with a component target; the
+ *      top-level project CMakeLists adds it via EXTRA_COMPONENT_DIRS when the
+ *      folder exists. This file then sees the SDK headers automatically.
+ *   3. This translation unit compiles in the real run_classifier() path when
+ *      <edge_impulse_capsrd.h> is detected; otherwise the luma-brightness
+ *      stub keeps the firmware buildable and bootable pre-export.
  *
- *        ei_impulse_result_t result;
- *        EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
- *        // pick max score, feed centroids into fomo_result_t
- *
- * The stub below keeps the firmware buildable and bootable before training.
+ * Class semantics (2-class export):
+ *   EI_CLASS_FECES = 0 -> the target; drives spray + publish + green box.
+ *   EI_CLASS_PIG   = 1 -> context; a high pig score alone must never trigger.
+ *   A 1-class export (fecies only) is treated as class 0 throughout.
  */
 #include <string.h>
 
@@ -25,30 +24,81 @@
 
 #include "inference_service.h"
 
-#define EI_INPUT_W 96
-#define EI_INPUT_H 96
+/* Input geometry. A real export defines these in model_parameters.h; the
+ * fallbacks keep the stub build working without the SDK. */
+#define EI_INPUT_W_FALLBACK 96
+#define EI_INPUT_H_FALLBACK 96
 
-#define EI_INTERVAL_MS 0.0f
-#define EI_DNN_INPUT_SCALE 0.003921568627451f  /* 1/255 */
+/* Minimum FOMO cell score for a box to be reported as a detection. FOMO
+ * scores are per-cell and typically want ~0.4-0.6, not 0.8 like an
+ * object-detection score. */
+#define EI_FOMO_PRESENT_THRESHOLD 0.45f
 
-int edge_impulse_input_width(void)  { return EI_INPUT_W; }
-int edge_impulse_input_height(void) { return EI_INPUT_H; }
+#if defined(__has_include)
+#  if __has_include("edge_impulse_capsrd.h")
+#    define EI_SDK_PRESENT 1
+#  endif
+#endif
+#ifndef EI_SDK_PRESENT
+#  define EI_SDK_PRESENT 0
+#endif
 
-/* Pixel-level feature provider that a real model needs. For the stub we
- * ignore input RGB and just accumulate a "score" so the pipeline runs. */
+#if EI_SDK_PRESENT
+#include "edge-impulse-sdk/classifier/ei_run_classifier.h" /* run_classifier */
+#include "edge-impulse-sdk/classifier/ei_classifier_types.h"
+#include "edge-impulse-sdk/dsp/numpy.hpp"                   /* signal_from_buffer */
+#include "model-parameters/model_metadata.h"
+#endif
+
+static const char *TAG = "ei_invoke";
+
+int edge_impulse_input_width(void)
+{
+#if EI_SDK_PRESENT
+    return EI_CLASSIFIER_INPUT_WIDTH;
+#else
+    return EI_INPUT_W_FALLBACK;
+#endif
+}
+
+int edge_impulse_input_height(void)
+{
+#if EI_SDK_PRESENT
+    return EI_CLASSIFIER_INPUT_HEIGHT;
+#else
+    return EI_INPUT_H_FALLBACK;
+#endif
+}
+
+/* Honest model id for /status + dashboard logging so the panel is never
+ * misled about what is actually running on the device. */
+const char *edge_impulse_model_tag(void)
+{
+#if EI_SDK_PRESENT
+#  if EI_CLASSIFIER_NUMBER_OF_CLASSES == 2
+    return "fomo:2class";
+#  else
+    return "fomo:1class";
+#  endif
+#else
+    return "fomo:stub";
+#endif
+}
+
+/* ------------------------------------------------------------------ stub */
 static float prv_stub_feature(uint8_t r, uint8_t g, uint8_t b)
 {
     return (0.299f * r + 0.587f * g + 0.114f * b);
 }
 
-/* Stub model: emits a weak "object present" signal so /status + spray logic
- * can be exercised without a trained model. Replace with the real FOMO. */
+/* Pre-export stub: central brightness as a stand-in "score". Always reports
+ * class 0 (feces) so the full pipeline — box overlay, spray gate, publish —
+ * can be exercised. A real model replaces this at compile time. */
 static bool prv_run_stub(const uint8_t *input_rgb888, int w, int h,
                          fomo_result_t *out, uint32_t *elapsed_ms)
 {
     uint32_t t0 = esp_timer_get_time();
 
-    /* Central brightness as a stand-in "novelty" score in [0,1]. */
     float sum = 0.0f;
     int n = w * h;
     for (int i = 0; i < n; i += 7) {
@@ -59,7 +109,8 @@ static bool prv_run_stub(const uint8_t *input_rgb888, int w, int h,
     float score = mean / 255.0f;
 
     out->score = score;
-    out->object_present = score >= 0.8f;
+    out->class_id = (score >= 0.8f) ? EI_CLASS_FECES : -1;
+    out->object_present = out->class_id == EI_CLASS_FECES;
     out->x = 0.5f;
     out->y = 0.5f;
     out->width = 0.2f;
@@ -69,28 +120,100 @@ static bool prv_run_stub(const uint8_t *input_rgb888, int w, int h,
     return true;
 }
 
-/*
- * Public entry point. Routes to the stub until the real Edge Impulse SDK
- * is vendored in. See the top-of-file instructions.
- */
+#if EI_SDK_PRESENT
+
+/* RGB888 -> int8 input tensor exactly as the export's DSP block expects.
+ * Edge Impulse int8 images are centred on 0 with a 1/255 or 1/127.5 scale;
+ * the int8 tensor from the standard mobile-net preprocessing is px-128. */
+static void prv_fill_tensor(const uint8_t *rgb888, int w, int h,
+                            int16_t *buf)
+{
+    const int ch = EI_CLASSIFIER_INPUT_CHANNELS;
+    for (int i = 0; i < w * h; i++) {
+        const int16_t r = rgb888[i * 3 + 0];
+        const int16_t g = rgb888[i * 3 + 1];
+        const int16_t b = rgb888[i * 3 + 2];
+        if (ch == 1) {
+            buf[i] = (int16_t)((EI_DNN_INPUT_SCALE * (0.299f * r + 0.587f * g + 0.114f * b)));
+        } else {
+            buf[i * 3 + 0] = (int16_t)(r - 128);
+            buf[i * 3 + 1] = (int16_t)(g - 128);
+            buf[i * 3 + 2] = (int16_t)(b - 128);
+        }
+    }
+}
+
+static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
+                               fomo_result_t *out, uint32_t *elapsed_ms)
+{
+    uint32_t t0 = esp_timer_get_time();
+
+    const int iw = EI_CLASSIFIER_INPUT_WIDTH;
+    const int ih = EI_CLASSIFIER_INPUT_HEIGHT;
+    const int ch = EI_CLASSIFIER_INPUT_CHANNELS;
+
+    /* The caller feeds exactly the model's input geometry, but an odd sensor
+     * aspect could slip a mismatched size through. Guard before touching the
+     * stack/heap so a bad resize cannot silently corrupt class scores. */
+    if (w != iw || h != ih) {
+        ESP_LOGW(TAG, "input %dx%d != model %dx%d", w, h, iw, ih);
+        return false;
+    }
+
+    int16_t *buf = malloc((size_t)iw * ih * ch * sizeof(int16_t));
+    if (buf == NULL) return false;
+
+    prv_fill_tensor(input_rgb888, w, h, buf);
+
+    signal_t signal;
+    int err = numpy::signal_from_buffer(buf, iw * ih * ch, &signal);
+    if (err != 0) {
+        free(buf);
+        return false;
+    }
+
+    ei_impulse_result_t result = { 0 };
+    EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
+    free(buf);
+
+    if (r != EI_IMPULSE_OK) {
+        ESP_LOGW(TAG, "run_classifier returned %d", (int)r);
+        return false;
+    }
+
+    /* Find the highest-scoring box and pick the class that goes with it. */
+    out->score = 0.0f;
+    out->class_id = -1;
+    for (size_t i = 0; i < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ++i) {
+        const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[i];
+        if (bb->value < EI_FOMO_PRESENT_THRESHOLD || bb->value <= out->score) {
+            continue;
+        }
+        out->score = bb->value;
+        out->class_id = bb->label_id;
+        /* Edge Impulse boxes are (x, y, w, h) of the bounding box in
+         * normalized 0..1 coords. fomo_result_t stores the centroid + size. */
+        out->x = bb->x + bb->width / 2.0f;
+        out->y = bb->y + bb->height / 2.0f;
+        out->width = bb->width;
+        out->height = bb->height;
+    }
+
+    out->object_present = out->class_id == EI_CLASS_FECES;
+    *elapsed_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000u);
+    return true;
+}
+
+#endif /* EI_SDK_PRESENT */
+
 bool edge_impulse_run_model(const uint8_t *input_rgb888, int w, int h,
                             fomo_result_t *out, uint32_t *elapsed_ms)
 {
     if (input_rgb888 == NULL || out == NULL) return false;
     memset(out, 0, sizeof(*out));
 
-#if 0 /* ---- replace `#if 0` with `#if 1` once you have the export ---- */
-    // Example with the Edge Impulse C++ SDK (source included under
-    // edge_impulse/). The variable `signal` wraps input_rgb888 as the
-    // model's expected input tensor.
-    ei_impulse_result_t result = { 0 };
-    signal_t signal;
-    int16_t buf[EI_INPUT_W * EI_INPUT_H * EI_CLASSIFIER_CHANNELS];
-    // ... fill buf from input_rgb888 using EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
-    // ... then run_classifier(&signal, &result, false);
-    // ... map result.classification / bounding boxes into *out
-    *elapsed_ms = 0;
-    return true;
+#if EI_SDK_PRESENT
+    return prv_run_classifier(input_rgb888, w, h, out, elapsed_ms);
 #else
     return prv_run_stub(input_rgb888, w, h, out, elapsed_ms);
 #endif

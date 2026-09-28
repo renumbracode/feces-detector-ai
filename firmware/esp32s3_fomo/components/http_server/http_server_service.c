@@ -31,6 +31,7 @@
 #include "camera_service.h"
 #include "inference_service.h"
 #include "spray_controller.h"
+#include "detection_service.h"
 #include "http_server_service.h"
 
 static const char *TAG = "http_svc";
@@ -82,18 +83,44 @@ static esp_err_t handler_status(httpd_req_t *req)
     inference_service_latest(&last);
 
     uint32_t free_sram = (uint32_t)esp_get_free_heap_size();
-    char buf[512];
+    /* fomo_result_t stores x,y as the box CENTROID; the dashboard overlay
+     * draws from the top-left corner, so convert here. */
+    float tlx = last.x - last.width / 2.0f;
+    float tly = last.y - last.height / 2.0f;
+    if (tlx < 0.0f) tlx = 0.0f;
+    if (tly < 0.0f) tly = 0.0f;
+    if (tlx + last.width > 1.0f) tlx = 1.0f - last.width;
+    if (tly + last.height > 1.0f) tly = 1.0f - last.height;
+    char buf[1024];
+    /* vrf = the server-side YOLOv8 answer for the live frame, polled on a
+     * fixed cadence so the dashboard overlay has a real detection even while
+     * the on-device FOMO model is still a stub. Display only; it never gates
+     * the relay. */
+    verify_result_t vr;
+    detection_service_verify_result(&vr);
     int n = snprintf(buf, sizeof(buf),
-        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":0,\"model\":\"fomo:v1\","
+        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":0,\"model\":\"%s\","
         "\"sprayActive\":%s,\"cooldownActive\":%s,"
         "\"lastConfidence\":%.4f,\"objectPresent\":%s,"
+        "\"classId\":%d,\"box\":{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
+        "\"vrf\":{\"valid\":%s,\"detected\":%s,\"conf\":%.4f,\"ageMs\":%u,"
+        "\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
         "\"lastSprayAgoMs\":%llu,\"uptimeS\":%llu,"
         "\"inferenceMs\":%u,\"detections\":0}",
         wifi_ip_str(), (unsigned)free_sram,
+        edge_impulse_model_tag(),
         sp.spraying ? "true" : "false",
         sp.cooldown_active ? "true" : "false",
         (double)sp.last_confidence,
         last.object_present ? "true" : "false",
+        last.class_id,
+        (double)tlx, (double)tly,
+        (double)last.width, (double)last.height,
+        vr.valid ? "true" : "false",
+        vr.detected ? "true" : "false",
+        (double)vr.conf,
+        (unsigned)vr.age_ms,
+        (double)vr.x, (double)vr.y, (double)vr.w, (double)vr.h,
         (unsigned long long)sp.last_spray_ago_ms,
         (unsigned long long)(esp_timer_get_time() / 1000000u),
         (unsigned)last.inference_ms);
@@ -132,9 +159,9 @@ static esp_err_t handler_config(httpd_req_t *req)
     char buf[512];
     int n = snprintf(buf, sizeof(buf),
         "{\"threshold\":%.2f,\"cooldown_ms\":%u,\"spray_ms\":%u,"
-        "\"verify_url\":\"%s\",\"dash_url\":\"%s\"}",
+        "\"verify_url\":\"%s\",\"dash_url\":\"%s\",\"dash_verify_url\":\"%s\"}",
         (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
-        cfg.verify_url, cfg.dash_url);
+        cfg.verify_url, cfg.dash_url, cfg.dash_verify_url);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -190,6 +217,11 @@ static esp_err_t handler_config_post(httpd_req_t *req)
         strncpy(cfg.dash_url, val, sizeof(cfg.dash_url) - 1);
         cfg.dash_url[sizeof(cfg.dash_url) - 1] = '\0';
     }
+    if (httpd_query_key_value(body, "dash_verify_url", val, sizeof(val)) == ESP_OK
+            && val[0]) {
+        strncpy(cfg.dash_verify_url, val, sizeof(cfg.dash_verify_url) - 1);
+        cfg.dash_verify_url[sizeof(cfg.dash_verify_url) - 1] = '\0';
+    }
     if (httpd_query_key_value(body, "threshold", val, sizeof(val)) == ESP_OK) {
         float t = strtof(val, NULL);
         if (t >= 0.0f && t <= 1.0f) cfg.threshold = t;
@@ -219,12 +251,12 @@ static esp_err_t handler_setup(httpd_req_t *req)
     app_config_t cfg;
     app_config_load(&cfg);
 
-    char *page = malloc(2048);
+    char *page = malloc(3072);
     if (page == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
         return ESP_OK;
     }
-    int n = snprintf(page, 2048,
+    int n = snprintf(page, 3072,
         "<!doctype html><html><head><title>Feces Detector setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
@@ -242,6 +274,8 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "<label>Wi-Fi password</label><input name='wifi_pass' value='%s' maxlength='64'>"
         "<label>YOLOv8 verify URL</label><input name='verify_url' value='%s' maxlength='128'>"
         "<label>Dashboard API URL</label><input name='dash_url' value='%s' maxlength='256'>"
+        "<label>Dashboard verify URL (yolo_conf report)</label><input name='dash_verify_url' "
+        "value='%s' maxlength='256'>"
         "<label>Detection threshold (0..1)</label><input type='number' step='0.05' "
         "name='threshold' value='%.2f' min='0' max='1'>"
         "<label>Cooldown ms</label><input type='number' step='1000' name='cooldown_ms' "
@@ -250,7 +284,7 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "value='%u'>"
         "<button type='submit'>Save &amp; restart</button></form>"
         "</body></html>",
-        cfg.wifi_ssid, cfg.wifi_pass, cfg.verify_url, cfg.dash_url,
+        cfg.wifi_ssid, cfg.wifi_pass, cfg.verify_url, cfg.dash_url, cfg.dash_verify_url,
         (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms);
 
     httpd_resp_set_type(req, "text/html");
@@ -259,13 +293,18 @@ static esp_err_t handler_setup(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t handler_stream(httpd_req_t *req)
+/*
+ * The MJPEG loop lives on its own task. httpd runs every handler on a single
+ * server task, so a long-lived /stream handler would otherwise stall /status
+ * and every other endpoint while the camera is streaming (the dashboard then
+ * reports "device unreachable"). Hand the request to this task with the
+ * IDF 5.x async API so the server task stays free.
+ */
+static void stream_task(void *arg)
 {
-    prv_cors(req);
-    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
-    camera_streaming_start();
-
+    httpd_req_t *req = (httpd_req_t *)arg;
     char part_hdr[64];
+
     while (true) {
         camera_fb_t *fb = camera_service_get_frame();
         if (!fb) {
@@ -290,7 +329,33 @@ static esp_err_t handler_stream(httpd_req_t *req)
         vTaskDelay(pdMS_TO_TICKS(40)); /* ~25 fps target; inference runs in detect task */
     }
     camera_streaming_stop();
-    return ESP_OK;
+    httpd_req_async_handler_complete(req);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t handler_stream(httpd_req_t *req)
+{
+    prv_cors(req);
+    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
+    camera_streaming_start();
+
+    httpd_req_t *async_req = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &async_req);
+    if (err != ESP_OK) {
+        camera_streaming_stop();
+        ESP_LOGE(TAG, "stream async begin failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "stream unavailable");
+        return ESP_OK;
+    }
+
+    /* Priority 4 keeps the httpd task (prio 5) responsive to /status. */
+    if (xTaskCreate(stream_task, "stream", 4096, async_req, 4, NULL) != pdPASS) {
+        camera_streaming_stop();
+        httpd_req_async_handler_complete(async_req);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no stream task");
+        return ESP_OK;
+    }
+    return ESP_OK; /* the stream task owns the response from here */
 }
 
 static httpd_uri_t uris[] = {

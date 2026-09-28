@@ -32,6 +32,7 @@ static const char *TAG = "camera_svc";
 #define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720: light MJPEG, enough for AI input */
 
 static volatile bool s_streaming = false;
+static volatile int s_streaming_refs = 0;
 
 esp_err_t camera_service_init(void)
 {
@@ -95,5 +96,17 @@ void camera_service_release_frame(camera_fb_t *fb)
     if (fb) esp_camera_fb_return(fb);
 }
 
-void camera_streaming_start(void) { s_streaming = true; }
-void camera_streaming_stop(void)  { s_streaming = false; }
+/* Refcounted: /stream runs on its own task, so a second viewer (or a browser
+ * reconnect where the old socket closes after the new one opens) must not cut
+ * the camera feed for the others. */
+void camera_streaming_start(void)
+{
+    s_streaming_refs++;
+    s_streaming = true;
+}
+
+void camera_streaming_stop(void)
+{
+    if (s_streaming_refs > 0) s_streaming_refs--;
+    s_streaming = (s_streaming_refs > 0);
+}

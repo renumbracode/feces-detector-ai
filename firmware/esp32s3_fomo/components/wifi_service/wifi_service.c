@@ -33,7 +33,9 @@ static void prv_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 esp_err_t wifi_service_start(void)
 {
-    app_config_t cfg;
+    /* static: app_config_t is ~750 B and this runs on the main task, whose
+     * stack is small. Keeping it off the stack avoids smashing the heap. */
+    static app_config_t cfg;
     app_config_load(&cfg);
 
     s_events = xEventGroupCreate();
