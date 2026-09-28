@@ -7,7 +7,7 @@ Validates whether the model meets the 80% accuracy target.
 
 Usage:
     python evaluate.py
-    python evaluate.py --model training/runs/detect/train/weights/best.pt
+    python evaluate.py --model training/runs/detect/weights/best.pt
     python evaluate.py --model best.pt --data training/dataset.yaml --target 0.80
 
 Exit codes:
@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate YOLOv8 pig feces detection model.")
     parser.add_argument(
         "--model",
-        default=str(Path(__file__).parent / "runs" / "detect" / "train" / "weights" / "best.pt"),
+        default=str(Path(__file__).parent / "runs" / "detect" / "weights" / "best.pt"),
         help="Path to trained model weights.",
     )
     parser.add_argument(
@@ -107,6 +107,26 @@ def main():
     print_metric("Precision", precision)
     print_metric("Recall", recall)
     print_metric("F1 Score", f1)
+
+    # Per-class mAP. With a 2-class model (feces + pig) the aggregate hides
+    # feces-only performance, which is the number the panel actually cares
+    # about, so break it out explicitly.
+    per_class = []
+    ap50 = getattr(metrics.box, "ap50", None)
+    names = getattr(metrics, "names", None)
+    ap_cls = getattr(metrics.box, "ap_class_index", None)
+    if (
+        ap50 is not None
+        and ap_cls is not None
+        and len(ap50) > 1
+    ):
+        print()
+        for ci, idx in enumerate(ap_cls):
+            name = names.get(int(idx), str(idx)) if names else str(idx)
+            val = float(ap50[ci])
+            per_class.append((name, val))
+            print(f"    {name:<20} {val * 100:6.1f}%")
+
     print()
 
     passed = map50 >= args.target
@@ -136,8 +156,12 @@ def main():
         f.write(f"mAP50-95:   {map5095 * 100:.1f}%\n")
         f.write(f"Precision:  {precision * 100:.1f}%\n")
         f.write(f"Recall:     {recall * 100:.1f}%\n")
-        f.write(f"F1 Score:   {f1 * 100:.1f}%\n\n")
-        f.write(f"RESULT: {'PASS' if passed else 'FAIL'}\n")
+        f.write(f"F1 Score:   {f1 * 100:.1f}%\n")
+        if per_class:
+            f.write("\nPer-class mAP50:\n")
+            for name, val in per_class:
+                f.write(f"  {name:<16} {val * 100:.1f}%\n")
+        f.write(f"\nRESULT: {'PASS' if passed else 'FAIL'}\n")
     print(f"  Summary saved: {summary_path}")
 
     return 0 if passed else 1

@@ -26,29 +26,33 @@ Tick items off as they complete. Workflows for each step are in `docs/setup-guid
 - [ ] ESP-IDF v5.x installed; `idf.py set-target esp32s3` succeeds
 - [ ] Firmware builds: `idf.py build`
 - [ ] Flashed: `idf.py -p COMx flash monitor`
-- [ ] Camera init OK (OV3660), `/stream` shows MJPEG
-- [ ] `/status` returns JSON (heap, spray, confidence, model)
+- [x] Camera init OK (OV3660), `/stream` shows MJPEG (~7 fps confirmed)
+- [x] `/status` returns JSON (heap, spray, confidence, model)
 - [ ] Relay wired: `APP_PIN_RELAY` (GPIO 4) -> relay -> water pump
-- [ ] On-device auto-spray triggers on detection (respects cooldown)
+- [x] On-device auto-spray triggers on detection (respects cooldown;
+      E2E row id 7 "auto spray" + 8/9 "cooldown detected")
 
 ## Phase 4 — Server YOLOv8 verification
 
 - [ ] Python env: `pip install -r server/yolo_verify/requirements.txt`
 - [ ] Server model trained: `python training/train.py`
 - [ ] Evaluation passed: `python training/evaluate.py` mAP50 >= 80%
-- [ ] Verify server runs: `uvicorn app:app --port 8000`
-- [ ] `GET /health` returns model info
-- [ ] ESP32 uploads detected frames to `POST /verify`
+- [x] Verify server runs: `uvicorn app:app --port 8000` (PID 14360, file logs)
+- [x] `GET /health` returns model info
+- [x] ESP32 uploads detected frames to `POST /verify` (200s in uvicorn log)
 
 ## Phase 5 — Dashboard + field test
 
 - [ ] CodeIgniter 3 `system/` added to `dashboard/`
 - [ ] Dashboard imported `database.sql` and is accessible
 - [ ] Control settings: device IP/port + verify URL set correctly
-- [ ] Live page shows ESP32 stream
-- [ ] Manual spray works (Spray now button)
+- [x] Live page shows ESP32 stream (CORS + stall fixes; `src=http://192.168.1.39/stream`)
+- [x] Manual spray works (Spray now button -> `/spray?duration=N`)
 - [ ] Auto-detection works: feces -> on-device spray -> history logs it
+      (partially: chain proven with interim FOMO stub; real trigger needs the
+      trained `feces` model)
 - [ ] YOLOv8 verified badge appears on logged detections
+      (needs real trained model; interim COCO model reports uclass:none)
 - [ ] Threshold / cooldown / spray duration tuned
 - [ ] Detection metrics recorded in `training/notes/`
 

@@ -38,7 +38,7 @@ Runs unmodified YOLOv8 on the server (feasible there, not on the MCU).
 cd server/yolo_verify
 pip install -r requirements.txt
 # set the model path (optional):
-#   export YOLO_MODEL=/abs/path/to/training/runs/detect/train/weights/best.pt
+#   export YOLO_MODEL=/abs/path/to/training/runs/detect/weights/best.pt
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
@@ -88,7 +88,7 @@ python prepare_dataset.py --target-size 96
 ```bash
 cd training
 python train.py --model yolov8n --epochs 100
-python evaluate.py --model runs/detect/train/weights/best.pt   # target mAP50 >= 80%
+python evaluate.py --model runs/detect/weights/best.pt   # target mAP50 >= 80%
 ```
 
 ## 5. End-to-end test

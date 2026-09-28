@@ -7,10 +7,11 @@ Usage:
     python train.py --model yolov8n --epochs 100 --imgsz 640 --batch 16
     python train.py --model yolov8s --epochs 200 --patience 20
 
-Outputs:
-    - Best model:  training/runs/detect/train/weights/best.pt
-    - Last model:  training/runs/detect/train/weights/last.pt
-    - Metrics CSV: training/runs/detect/train/results.csv
+Outputs (with the default --project/--name/--exist-ok, ultralytics writes
+directly into the run dir rather than nesting under train/):
+    - Best model:  training/runs/detect/weights/best.pt
+    - Last model:  training/runs/detect/weights/last.pt
+    - Metrics CSV: training/runs/detect/results.csv
 """
 
 import argparse
@@ -92,6 +93,7 @@ def main():
 
     best_path = Path(args.project) / args.name / "weights" / "best.pt"
     last_path = Path(args.project) / args.name / "weights" / "last.pt"
+    run_dir = Path(args.project) / args.name
 
     print()
     print("=" * 60)
@@ -99,12 +101,14 @@ def main():
     print("=" * 60)
     if best_path.exists():
         print(f"  Best model: {best_path}")
+    else:
+        print(f"  WARNING: no best.pt at {best_path}")
     if last_path.exists():
         print(f"  Last model: {last_path}")
-    print(f"  Results:    {Path(args.project) / args.name / 'results.csv'}")
+    print(f"  Results:    {run_dir / 'results.csv'}")
     print()
     print("  Next steps:")
-    print("    python evaluate.py --model training/runs/detect/train/weights/best.pt")
+    print(f"    python evaluate.py --model {best_path}")
     print("=" * 60)
 
     return 0

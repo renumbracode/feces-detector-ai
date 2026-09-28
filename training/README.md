@@ -10,10 +10,10 @@ This folder holds the YOLOv8 training pipeline for pig feces detection.
 python train.py --model yolov8n.pt --epochs 100
 
 # 3. Evaluate (target: mAP50 >= 80%)
-python evaluate.py --model runs/detect/train/weights/best.pt
+python evaluate.py --model runs/detect/weights/best.pt
 
 # 4. Use best.pt on the verification server
-#    set YOLO_MODEL to runs/detect/train/weights/best.pt in server/yolo_verify
+#    set YOLO_MODEL to runs/detect/weights/best.pt in server/yolo_verify
 ```
 
 ## Dataset Structure
@@ -79,7 +79,7 @@ The trained `best.pt` is used directly by the server-side verification service:
 ```
 server/yolo_verify/        (FastAPI + ultralytics -> POST /verify)
 ```
-Point its `YOLO_MODEL` env var at `runs/detect/train/weights/best.pt`.
+Point its `YOLO_MODEL` env var at `runs/detect/weights/best.pt`.
 
 ## On-device model (ESP32-S3)
 

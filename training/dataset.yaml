@@ -2,5 +2,8 @@ path: ../dataset
 train: images/train
 val: images/val
 
-nc: 1
-names: ['feces']
+# Roboflow pig-feces-bblfq v1 annotates both. Keeping the pig class stops the
+# detector from learning "pig body = background" by context alone, which is what
+# produced false-positive sprays. Only class 0 (feces) ever triggers a spray.
+nc: 2
+names: ['feces', 'pig']

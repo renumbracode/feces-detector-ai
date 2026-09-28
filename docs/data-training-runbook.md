@@ -70,10 +70,10 @@ cd training
 python train.py --model yolov8n.pt --epochs 100
 
 # 2. Evaluate (target mAP50 >= 80%; exits with code 1 if below target)
-python evaluate.py --model runs/detect/train/weights/best.pt
+python evaluate.py --model runs/detect/weights/best.pt
 ```
 
-**Results** land in `training/runs/detect/train/weights/best.pt` and
+**Results** land in `training/runs/detect/weights/best.pt` and
 `evaluation_summary.txt`. Record metrics into `training/notes/` for panel
 evidence.
 
@@ -112,14 +112,23 @@ Recommended when local training on CPU is too slow. The dataset is pre-packed.
    training/runs/detect/results.csv
    ```
 
-   (Note the Colab `--name detect` writes weights to `runs/detect/weights/`
-   rather than `runs/detect/train/weights/`; adjust the paths in the next two
-   sections accordingly or move `best.pt` to the default location.)
+   Rather than unzipping by hand, use the installer — it finds the weights
+   inside the zip no matter which layout the run used, and refuses to clobber
+   an existing `best.pt` without `--force`:
+
+   ```bash
+   python training/install_colab_weights.py /path/to/training-outputs.zip
+   ```
+
+   Both weight layouts are supported everywhere:
+   `runs/detect/weights/best.pt` (what `--exist-ok` produces) and
+   `runs/detect/train/weights/best.pt` (what an incremented run name produces).
+   The verify server probes both automatically.
 
 **Point the verify server at it**
 ```bash
 cd server/yolo_verify
-export YOLO_MODEL="/abs/path/to/training/runs/detect/train/weights/best.pt"
+export YOLO_MODEL="/abs/path/to/training/runs/detect/weights/best.pt"
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 `curl http://localhost:8000/health` should report `model_loaded: true`.
