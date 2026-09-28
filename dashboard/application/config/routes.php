@@ -10,4 +10,5 @@ $route['history'] = 'history';
 $route['control'] = 'control';
 $route['api/latest'] = 'api/latest';
 $route['api/insert'] = 'api/insert';
+$route['api/verify'] = 'api/verify';
 $route['api/status'] = 'api/status';

@@ -22,20 +22,52 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from PIL import Image
 import numpy as np
 from ultralytics import YOLO
 
-MODEL_PATH = os.environ.get(
-    "YOLO_MODEL",
-    str(Path(__file__).resolve().parents[2] / "training" / "runs" / "detect" / "train" / "weights" / "best.pt"),
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUN_DIR = REPO_ROOT / "training" / "runs" / "detect"
+
+# Ultralytics writes weights to <project>/<name>/weights when a run is created
+# with exist_ok=True (which training/train.py passes), but to
+# <project>/<name>/train/weights when it has to increment a run name. Both
+# layouts exist in the wild, so probe for either instead of hard-coding one.
+WEIGHT_CANDIDATES = (
+    RUN_DIR / "weights" / "best.pt",
+    RUN_DIR / "train" / "weights" / "best.pt",
 )
+
+
+def resolve_model_path() -> Path:
+    """YOLO_MODEL env var if set, else the first weights file that exists."""
+    env = os.environ.get("YOLO_MODEL")
+    if env:
+        return Path(env)
+    for candidate in WEIGHT_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return WEIGHT_CANDIDATES[0]
+
+
+MODEL_PATH = resolve_model_path()
 CONF_THRESHOLD = float(os.environ.get("YOLO_CONF", "0.25"))
 MAX_IMAGE_SIZE = (416, 416)  # resize long edge toward 416 to keep inference fast
+TARGET_CLASS = os.environ.get("YOLO_TARGET_CLASS", "feces")  # trained model, 2-class
 
 app = FastAPI(title="Feces YOLOv8 Verifier", version="1.0.0")
+
+# The dashboard is served from Apache on :80 while this runs on :8000, so the
+# live view's fetch() is cross-origin. The device is not affected either way.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 _model: YOLO | None = None
 
@@ -56,6 +88,8 @@ def health():
         "model_exists": ok,
         "model_loaded": _model is not None,
         "conf_threshold": CONF_THRESHOLD,
+        "searched": [str(p) for p in WEIGHT_CANDIDATES],
+        "classes": _model.names if _model else None,
     }
 
 
@@ -76,7 +110,9 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
     long_edge = max(width, height)
     if long_edge > MAX_IMAGE_SIZE[0]:
         scale = MAX_IMAGE_SIZE[0] / long_edge
-        pil = pil.resize((int(width * scale), int(height * scale)))
+        width, height = int(width * scale), int(height * scale)
+        pil = pil.resize((width, height))
+    # Boxes below are in the *resized* frame, so width/height must describe it.
 
     arr = np.asarray(pil)
     results = get_model().predict(
@@ -86,8 +122,8 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
     )
 
     boxes = []
-    best_conf = 0.0
-    uclass = "none"
+    best_per_class: dict[str, float] = {}
+    best_target_box = None
     for r in results:
         if r.boxes is None or len(r.boxes) == 0:
             continue
@@ -101,20 +137,59 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
                 "x2": round(x2, 1), "y2": round(y2, 1),
                 "conf": round(c, 4), "class": name,
             })
-            if c > best_conf:
-                best_conf = c
-                uclass = name
+            if c > best_per_class.get(name, 0.0):
+                best_per_class[name] = c
+            if name == TARGET_CLASS and (best_target_box is None or c > best_target_box["conf"]):
+                best_target_box = {
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "conf": c,
+                }
 
-    triggered = best_conf >= CONF_THRESHOLD and uclass == "feces"
+    # The detector is 2-class (feces + pig). Only a feces box is a detection,
+    # so never let a confident pig box mask a real feces box: report the
+    # highest-scoring *feces* box, and carry the best pig score alongside it
+    # so a "no feces" answer can be explained.
+    feces_conf = best_per_class.get(TARGET_CLASS, 0.0)
+    pig_conf = best_per_class.get("pig", 0.0)
+    best_conf = max(best_per_class.values(), default=0.0)
+    uclass = TARGET_CLASS if feces_conf > 0 else (
+        max(best_per_class, key=best_per_class.get) if best_per_class else "none"
+    )
+    triggered = feces_conf >= CONF_THRESHOLD
+
+    # Normalized 0..1 geometry for the best target-class box, so a thin client
+    # (the ESP32 overlay) can draw it without knowing the frame size. Sent in
+    # post-resize coordinates, matching "boxes" above.
+    box_norm = None
+    if best_target_box is not None:
+        bw = max(1, width)
+        bh = max(1, height)
+        nx1 = max(0.0, best_target_box["x1"] / bw)
+        ny1 = max(0.0, best_target_box["y1"] / bh)
+        nx2 = min(1.0, best_target_box["x2"] / bw)
+        ny2 = min(1.0, best_target_box["y2"] / bh)
+        if nx2 > nx1 and ny2 > ny1:
+            box_norm = {
+                "x": round(nx1, 4),
+                "y": round(ny1, 4),
+                "w": round(nx2 - nx1, 4),
+                "h": round(ny2 - ny1, 4),
+            }
 
     return {
+        # Compact fields first: the ESP32 reads this reply into a small fixed
+        # buffer, so what it needs must appear before the verbose box list.
         "ok": True,
-        "yolo_conf": round(best_conf, 4),
+        "yolo_conf": round(feces_conf, 4),
+        "detected": triggered,
+        "box_norm": box_norm,
         "uclass": uclass,
         "fomo_conf": fomo_conf,
         "triggered": triggered,
+        "best_any_conf": round(best_conf, 4),
+        "feces_conf": round(feces_conf, 4),
+        "pig_conf": round(pig_conf, 4),
         "n_boxes": len(boxes),
-        "boxes": boxes,
+        "boxes": sorted(boxes, key=lambda b: -b["conf"])[:8],
         "width": width,
         "height": height,
     }

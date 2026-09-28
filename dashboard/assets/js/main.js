@@ -98,6 +98,13 @@
     if (j.model) {
       parts.push('<span class="chip">' + esc(j.model) + '</span>');
     }
+    /* The overlay square is driven by the server-side YOLOv8 answer while the
+     * on-device model is still the pre-export stub, so say so plainly. */
+    if (j.vrf && j.vrf.valid) {
+      parts.push('<span class="chip ' + (j.vrf.detected ? 'chip-verified' : 'chip-off') + '">' +
+        'YOLO ' + Number(j.vrf.conf || 0).toFixed(2) + (j.vrf.detected ? ' hit' : ' clear') +
+        '</span>');
+    }
     if (typeof j.fps === 'number' && j.fps > 0) {
       parts.push('<span class="chip">' + j.fps + ' FPS</span>');
     }
@@ -113,6 +120,7 @@
   function initStatusPoll(opts) {
     const chipsEl = qs(opts.chipsEl);
     const bannerEl = opts.bannerEl ? qs(opts.bannerEl) : null;
+    const onUpdate = typeof opts.onUpdate === 'function' ? opts.onUpdate : null;
     if (!chipsEl) return;
     async function tick() {
       try {
@@ -120,9 +128,11 @@
         if (!res.ok) throw new Error(res.status);
         const j = await res.json();
         chipsEl.innerHTML = statusChips(j);
+        if (onUpdate) onUpdate(j);
         if (bannerEl) bannerEl.hidden = true;
       } catch (err) {
         chipsEl.innerHTML = '<span class="chip chip-off">Device unreachable</span>';
+        if (onUpdate) onUpdate(null);
         if (bannerEl) bannerEl.hidden = false;
       }
     }

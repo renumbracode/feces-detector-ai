@@ -14,7 +14,7 @@ verification/analytics on uploaded frames.
 pip install -r requirements.txt
 
 # optional: point at a different trained weights file
-export YOLO_MODEL="../../../training/runs/detect/train/weights/best.pt"
+export YOLO_MODEL="../../../training/runs/detect/weights/best.pt"
 
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -48,7 +48,7 @@ Returns:
 
 | Env var | Default |
 |---|---|
-| `YOLO_MODEL` | `<repo>/training/runs/detect/train/weights/best.pt` |
+| `YOLO_MODEL` | `<repo>/training/runs/detect/weights/best.pt` |
 | `YOLO_CONF` | `0.25` |
 
 ## Integration

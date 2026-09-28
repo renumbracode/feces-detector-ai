@@ -72,4 +72,31 @@ class Api extends MY_Controller
         $body = $this->http_get($this->status_url());
         $this->output->set_output($body !== null ? $body : json_encode(['ok' => false, 'error' => 'unreachable']));
     }
+
+    /**
+     * GET /api/verify — third leg of the detection pipeline. Called by the
+     * ESP32-S3 after it POSTed a frame to the YOLOv8 verifier: records the
+     * verifier's confidence on the row it inserted in leg 1 so the history
+     * view can show the "YOLOv8 verified" badge.
+     */
+    public function verify()
+    {
+        $id = isset($_GET['detection_id']) ? (int) $_GET['detection_id'] : 0;
+        $yoloConf = isset($_GET['yolo_conf']) && is_numeric($_GET['yolo_conf'])
+            ? round((float) $_GET['yolo_conf'], 4) : 0.0;
+
+        if ($id <= 0) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(['ok' => false, 'error' => 'bad detection_id']));
+            return;
+        }
+        if ($yoloConf < 0 || $yoloConf > 1) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(['ok' => false, 'error' => 'yolo_conf out of range']));
+            return;
+        }
+
+        $this->Detection_model->mark_verified($id, $yoloConf);
+        $this->output->set_output(json_encode(['ok' => true, 'id' => $id, 'yolo_conf' => $yoloConf]));
+    }
 }
