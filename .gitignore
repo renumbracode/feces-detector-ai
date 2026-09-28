@@ -27,10 +27,16 @@ firmware/esp32s3_fomo/components/inference/edge_impulse/*
 !firmware/esp32s3_fomo/components/inference/edge_impulse/.gitkeep
 !firmware/esp32s3_fomo/components/inference/edge_impulse/README.md
 
+# Ultralytics label caches (regenerated on every val run)
+*.cache
+
 # Python
 __pycache__/
 *.pyc
 .venv/
+
+# Local agent workspace / session plans
+.opencode/
 
 # Editors / tooling
 .vscode/
