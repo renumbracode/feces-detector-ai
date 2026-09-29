@@ -16,6 +16,8 @@ dataset/*.zip
 training/*.json
 training/fomo/out_fomo/*
 !training/fomo/out_fomo/.gitkeep
+training/fomo/out_ei/*
+!training/fomo/out_ei/.gitkeep
 *.pt
 
 # ESP32-S3 firmware build artifacts
