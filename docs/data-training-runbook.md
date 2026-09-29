@@ -141,15 +141,19 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ```bash
 cd training/fomo
-python prepare_dataset.py --target-size 96
+python prepare_dataset.py --format yolo-txt
 ```
-This creates `training/fomo/out_fomo/` with `train.zip`, `test.zip` and
-`train.csv`/`test.csv` in Edge Impulse's bounding-box schema.
+This creates `training/fomo/out_fomo/train.zip` and `test.zip` in Edge Impulse's
+**YOLO TXT** layout, each with its own `classes.txt` + `data.yaml` covering both
+classes (`feces`, `pig`). No CSV Wizard is needed. The script prints per-class
+box counts and fails if a class id is out of range.
 
 ### D2. Edge Impulse project
-1. Create a project at https://studio.edgeimpulse.com.
-2. **Data acquisition** → upload `train.zip` (images) and `train.csv`
-   (annotations) → assign label **`feces`**. Repeat for `test.zip`/`test.csv`.
+1. Create a project at https://studio.edgeimpulse.com with labeling method
+   **Bounding boxes** and target **ESP32-S3**.
+2. **Data acquisition → Upload**: `out_fomo/train.zip` → format **YOLO TXT** →
+   category **training**; then `out_fomo/test.zip` → **testing**. Confirm both
+   `feces` and `pig` appear afterwards.
 3. **Impulse design**:
    - Image block: **96×96**.
    - Processing block: **Image** (grayscale shrinks footprint further).

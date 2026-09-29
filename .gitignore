@@ -30,6 +30,9 @@ firmware/esp32s3_fomo/components/inference/edge_impulse/*
 # Ultralytics label caches (regenerated on every val run)
 *.cache
 
+# Ultralytics val output written to CWD by validate.py
+/runs/
+
 # Python
 __pycache__/
 *.pyc

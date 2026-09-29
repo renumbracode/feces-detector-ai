@@ -76,10 +76,11 @@ static bool prv_jpeg_dims(const uint8_t *jpeg, size_t len, int *w, int *h)
 }
 
 /* Decode a JPEG to a small RGB888 buffer using the SIMD-optimised esp_jpeg
- * decoder with a 1/8 scale. The FOMO input is tiny (96x96), so decoding the
+ * decoder with a 1/8 scale. The FOMO input is tiny (160x160), so decoding the
  * full camera frame (1280x720) would be needlessly slow; scaling inside the
- * decoder is ~64x cheaper and produces an equivalent input. Returns NULL on
- * failure, setting w and h to the scaled output width and height. */
+ * decoder is ~64x cheaper. A 1280x720 frame at 1/8 gives 160x90, which
+ * prv_downscale_rgb() then resizes to whatever the model declares. Returns NULL
+ * on failure, setting w and h to the scaled output width and height. */
 static uint8_t *prv_decode_jpeg(const uint8_t *jpeg, size_t len, int *w, int *h)
 {
     int sw = 0, sh = 0;
@@ -124,7 +125,8 @@ fomo_result_t inference_service_classify(const uint8_t *jpeg, size_t len)
         return out;
     }
 
-    /* FOMO input: 96x96 RGB888 (common Edge Impulse FOMO size). */
+    /* FOMO input: 160x160 RGB888 (the Edge Impulse model size; the exported
+     * SDK overrides this via EI_CLASSIFIER_INPUT_WIDTH/HEIGHT). */
     const int IW = edge_impulse_input_width();
     const int IH = edge_impulse_input_height();
     uint8_t *small = malloc((size_t)IW * IH * 3);

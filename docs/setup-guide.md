@@ -78,9 +78,11 @@ insert your trained FOMO model.
 
 ```bash
 cd training/fomo
-python prepare_dataset.py --target-size 96
-# then follow training/fomo/README.md: upload to Edge Impulse, train FOMO,
-# export the ESP32 C++ library into firmware/.../components/inference/edge_impulse/
+python prepare_dataset.py --format yolo-txt
+# then follow training/fomo/README.md: upload the two zips to Edge Impulse as
+# "YOLO TXT" (160x160, FOMO-MobileNetV2 0.35, learning rate 0.001), train,
+# then export the ESP32 C++ library into
+# firmware/.../components/inference/edge_impulse/
 ```
 
 ### Server YOLOv8

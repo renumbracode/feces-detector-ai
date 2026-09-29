@@ -4,29 +4,56 @@ Prepare the YOLO-format dataset for Edge Impulse FOMO training.
 
 FOMO (Faster Objects, More Objects) detects objects as small per-cell
 scores rather than full bounding boxes. Edge Impulse expects a labelled
-image dataset; this script converts our YOLO txt labels into the format
-Edge Impulse ingestion accepts:
-
-  * A ZIP of images for each split (train/test), plus
-  * a CSV of annotations (filename, label, x, y, width, height) in the
-    folder structure Edge Impulse wants.
+image dataset; this script packs ours into the two formats its uploader
+accepts.
 
 Usage:
-    python prepare_dataset.py [--target-size 96] [--out-dir out_fomo]
-                              [--dataset ../dataset]
+    python prepare_dataset.py [--format yolo-txt] [--out-dir out_fomo]
+                              [--dataset ../dataset] [--target-size 160]
 
-The source images live in dataset/images/{train,val} with YOLO labels in
+Formats
+-------
+`yolo-txt` (default, recommended)
+    A straight repack. Edge Impulse's YOLO TXT layout is:
+        classes.txt
+        data.yaml
+        train/images/*.jpg  train/labels/*.txt
+        test/images/*.jpg   test/labels/*.txt
+    with each label line `class_id center_x center_y width height`,
+    normalized to [0,1]. That is already exactly the format our Roboflow
+    labels are in, so the files are copied byte-for-byte -- no coordinate
+    math, nothing to mis-map. Pick this format in the Studio uploader.
+
+`csv`
+    The older "Plain CSV" route. Writes one row per box with
+    `filename,label,x,y,width,height` plus a flat image ZIP. Note this is
+    NOT the Plain CSV schema Edge Impulse documents (that one wants
+    `file_name,classes,xmin,ymin,xmax,ymax` with absolute pixels), so it
+    only works through the CSV Wizard's manual column mapping. Kept for
+    reproducing earlier runs; prefer `yolo-txt`.
+
+Source data
+-----------
+Images live in dataset/images/{train,val} with YOLO labels in
 dataset/labels/{train,val}. The dataset is 2-class (feces = 0, pig = 1);
-class ids are mapped through training/dataset.yaml `names` into the label
-column. Images with no annotations at all are copied in but omitted from the
-CSV, which Edge Impulse treats as "no objects" background samples.
+class names are resolved from training/dataset.yaml. The repo split maps
+`val` -> Edge Impulse `test`.
+
+Every zip gets a `classes.txt` (and `data.yaml` for yolo-txt) written from
+the resolved names, so the uploader can name the classes rather than
+showing "0" and "1". The script prints per-class box counts and hard-fails
+if a class id is out of range, so a single-class zip can never again be
+silently trained against a 2-class configuration.
 
 FOMO-specific notes:
-  * Edge Impulse preprocesses to the model's input size (e.g. 96x96 or
-    160x160) itself and rescales the boxes, so the images are uploaded at
-    their native resolution and the box coordinates stay normalized to the
-    original image (they already are, from the YOLO labels).
-  * A 96x96 input is the smallest ESP32-S3 footprint.
+  * Edge Impulse preprocesses to the model's input size itself and rescales
+    the boxes, so images are uploaded at native resolution and coordinates
+    stay normalized to the original image (they already are).
+  * 160x160 is the intended input. It yields a 20x20 FOMO heat map, and the
+    10th-percentile feces blob in this dataset is ~5px at 96x96 but ~8.8px at
+    160x160. FOMO learns centroids per cell, so blobs much smaller than one
+    cell are hard to fit. 96x96 gives a 12x12 map and ~5px blobs.
+  * Set the learning rate to 0.001 in the FOMO learning block.
 """
 from __future__ import annotations
 
@@ -42,22 +69,25 @@ from pathlib import Path
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", type=Path, default=Path("../dataset"),
-                   help="Repo dataset dir with images/{train,val} labels/{train,val}.")
+    p.add_argument("--dataset", type=Path, default=None,
+                   help="Repo dataset dir with images/{train,val} labels/{train,val}. "
+                        "Defaults to <repo>/dataset, resolved from this script's "
+                        "location so it works from any cwd.")
     p.add_argument("--out-dir", type=Path, default=Path("out_fomo"),
-                   help="Where train.zip/test.zip + CSVs are written.")
-    p.add_argument("--target-size", type=int, default=96,
+                   help="Where the packed zips are written.")
+    p.add_argument("--format", choices=("yolo-txt", "csv"), default="yolo-txt",
+                   help="Edge Impulse uploader format. yolo-txt is a lossless "
+                        "repack; csv needs the CSV Wizard column mapping.")
+    p.add_argument("--target-size", type=int, default=160,
                    help="FOMO input size the Edge Impulse model will be trained "
-                        "at (96 or 160). Informational: Edge Impulse resizes and "
-                        "rescales boxes internally, so images are uploaded "
-                        "unmodified.")
+                        "at. Informational: Edge Impulse resizes and rescales "
+                        "boxes internally, so images are uploaded unmodified.")
     p.add_argument("--names", default=None,
                    help="Comma-separated class names in id order. Defaults to "
                         "the names list in training/dataset.yaml.")
     p.add_argument("--yaml", type=Path, default=Path("../dataset.yaml"),
                    help="dataset.yaml used to resolve class names.")
     return p.parse_args()
-
 
 def read_yolo_label(path: Path):
     """Yield (cls_id, x_c, y_c, w, h) floats from a YOLO txt file."""
@@ -79,7 +109,6 @@ def read_yolo_label(path: Path):
 
 def resolve_names(args) -> list[str]:
     """Class names in id order from --names, else training/dataset.yaml."""
-    """Class names in id order from --names, else training/dataset.yaml."""
     if args.names:
         names = [n.strip() for n in args.names.split(",") if n.strip()]
         if names:
@@ -100,9 +129,162 @@ def resolve_names(args) -> list[str]:
     return ["feces", "pig"]
 
 
+def find_images(d: Path) -> list[Path]:
+    """All jpg/png images in d, sorted for deterministic zips."""
+    return sorted(d.glob("*.[jJ][pP][gG]")) + sorted(d.glob("*.[pP][nN][gG]"))
+
+
+def data_yaml_text(names: list[str]) -> str:
+    """data.yaml contents; the uploader reads class names from this or classes.txt."""
+    lines = [
+        "path: .",
+        "train: train/images",
+        "val: test/images",
+        f"nc: {len(names)}",
+        "names: [" + ", ".join(f"'{n}'" for n in names) + "]",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def pack_yolo_txt(args, names, splits) -> None:
+    """Repack dataset/ into Edge Impulse's YOLO TXT layout, one zip per split.
+
+    Labels are copied byte-for-byte: our YOLO txt is already
+    `class_id cx cy w h` normalized to [0,1], which is exactly the Edge Impulse
+    YOLO TXT schema. Each zip carries its own classes.txt + data.yaml so the
+    uploader resolves class names per upload.
+    """
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+
+    for split, img_dir, lbl_dir in splits:
+        images = find_images(img_dir)
+        if not images:
+            print(f"[{split}] no images in {img_dir}, skipping", file=sys.stderr)
+            continue
+
+        stage = out / split
+        (stage / "images").mkdir(parents=True, exist_ok=True)
+        (stage / "labels").mkdir(parents=True, exist_ok=True)
+
+        per_class = {i: 0 for i in range(len(names))}
+        annotated = boxless = boxes_total = 0
+        bad_ids = set()
+        missing_lbl = 0
+
+        for img in images:
+            lbl = lbl_dir / (img.stem + ".txt")
+            if not lbl.exists():
+                missing_lbl += 1
+                continue
+            shutil.copyfile(img, stage / "images" / img.name)
+            shutil.copyfile(lbl, stage / "labels" / (img.stem + ".txt"))
+
+            boxes = read_yolo_label(lbl)
+            if not boxes:
+                # Empty label file = a genuine negative sample. Copied as-is so
+                # Edge Impulse sees it as "image with no objects".
+                boxless += 1
+                continue
+            annotated += 1
+            for (cls_id, _xc, _yc, _w, _h) in boxes:
+                if cls_id not in per_class:
+                    bad_ids.add(cls_id)
+                else:
+                    per_class[cls_id] += 1
+                boxes_total += 1
+
+        if bad_ids:
+            print(
+                f"ERROR: {split} label files reference class ids "
+                f"{sorted(bad_ids)} outside the {len(names)} classes in "
+                f"dataset.yaml ({names}). Refusing to write a zip Edge Impulse "
+                f"would mis-map.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # classes.txt / data.yaml at the zip root, per the EI YOLO TXT layout.
+        # newline="\n" so the uploader does not read a trailing "\r" as part of
+        # the class name on Windows.
+        with open(stage / "classes.txt", "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(names) + "\n")
+        with open(stage / "data.yaml", "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(data_yaml_text(names))
+
+        zip_path = out / f"{split}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted((stage / "images").glob("*")):
+                z.write(f, f"train/images/{f.name}" if split == "train"
+                        else f"test/images/{f.name}")
+            for f in sorted((stage / "labels").glob("*")):
+                z.write(f, f"train/labels/{f.name}" if split == "train"
+                        else f"test/labels/{f.name}")
+            z.write(stage / "classes.txt", "classes.txt")
+            z.write(stage / "data.yaml", "data.yaml")
+
+        counts = ", ".join(f"{names[i]}={per_class[i]}" for i in range(len(names)))
+        print(f"[{split:5s}] images={len(images) - missing_lbl} "
+              f"annotated={annotated} negative(no-box)={boxless} "
+              f"boxes={boxes_total} ({counts}) -> {zip_path}")
+        if missing_lbl:
+            print(f"       note: {missing_lbl} image(s) had no label file and were skipped")
+
+
+def pack_csv(args, names, splits) -> None:
+    """Legacy Plain-CSV-ish export. Needs the CSV Wizard column mapping."""
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    for split, img_dir, lbl_dir in splits:
+        flat = out / split
+        flat.mkdir(parents=True, exist_ok=True)
+        per_class = {i: 0 for i in range(len(names))}
+        annotated = boxless = 0
+        bad_ids = set()
+
+        with open(out / f"{split}.csv", "w", newline="") as f:
+            writer = csv.writer(f, lineterminator="\n")
+            writer.writerow(["filename", "label", "x", "y", "width", "height"])
+            for img in find_images(img_dir):
+                lbl = lbl_dir / (img.stem + ".txt")
+                if not lbl.exists():
+                    continue
+                shutil.copyfile(img, flat / img.name)
+                boxes = read_yolo_label(lbl)
+                if not boxes:
+                    boxless += 1
+                    continue
+                annotated += 1
+                for (cls_id, xc, yc, w, h) in boxes:
+                    if cls_id not in per_class:
+                        bad_ids.add(cls_id)
+                        continue
+                    per_class[cls_id] += 1
+                    writer.writerow([
+                        img.name, names[cls_id],
+                        round(max(0.0, xc - w / 2), 6), round(max(0.0, yc - h / 2), 6),
+                        round(min(1.0, w), 6), round(min(1.0, h), 6),
+                    ])
+
+        if bad_ids:
+            print(f"ERROR: {split} references class ids {sorted(bad_ids)} "
+                  f"not in {names}", file=sys.stderr)
+            sys.exit(1)
+
+        zip_path = out / f"{split}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in flat.glob("*"):
+                z.write(f, f.name)
+        counts = ", ".join(f"{names[i]}={per_class[i]}" for i in range(len(names)))
+        print(f"[{split:5s}] annotated={annotated} negative={boxless} "
+              f"({counts}) -> {zip_path} + {out / (split + '.csv')}")
+
+
 def main():
     args = parse_args()
-    dataset = args.dataset
+    # training/fomo/prepare_dataset.py -> repo root is two levels up.
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    dataset = args.dataset if args.dataset else repo_root / "dataset"
     out = args.out_dir
     names = resolve_names(args)
 
@@ -119,65 +301,36 @@ def main():
         )
         sys.exit(1)
 
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "train").mkdir(exist_ok=True)
-    (out / "test").mkdir(exist_ok=True)
-
     print(f"Classes (id -> label): " + ", ".join(f"{i}:{n}" for i, n in enumerate(names)))
+    print(f"Format: {args.format}   FOMO input target: {args.target_size}")
+    print()
 
-    kept = {"train": [0, 0], "test": [0, 0]}  # [annotated, boxless]
+    # repo `val` maps to Edge Impulse `test`
+    splits = (
+        ("train", train_imgs, train_lbls),
+        ("test", val_imgs, val_lbls),
+    )
 
-    for split, img_dir, lbl_dir, out_split in (
-        ("train", train_imgs, train_lbls, "train"),
-        ("test", val_imgs, val_lbls, "test"),  # Edge Impulse calls it 'test'
-    ):
-        if not img_dir.exists():
-            continue
-        with open(out / f"{split}.csv", "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["filename", "label", "x", "y", "width", "height"])
-
-            for img_path in sorted(img_dir.glob("*.[jJ][pP][gG]")) + \
-                             sorted(img_dir.glob("*.[pP][nN][gG]")):
-                lbl_path = lbl_dir / (img_path.stem + ".txt")
-                if not lbl_path.exists():
-                    continue
-                boxes = read_yolo_label(lbl_path)
-                dest = out / out_split / img_path.name
-                shutil.copyfile(img_path, dest)
-
-                if not boxes:
-                    # No boxes: Edge Impulse sees an image with no CSV row as
-                    # a background/"no objects" sample, so it is a negative.
-                    kept[split][1] += 1
-                    continue
-
-                for (cls_id, xc, yc, w, h) in boxes:
-                    label = names[cls_id] if cls_id < len(names) else f"c{cls_id}"
-                    # Edge Impulse bounding-box schema: x/y = top-left,
-                    # width/height, all relative to the source image.
-                    writer.writerow([
-                        img_path.name, label,
-                        round(max(0.0, xc - w / 2), 6),
-                        round(max(0.0, yc - h / 2), 6),
-                        round(min(1.0, w), 6),
-                        round(min(1.0, h), 6),
-                    ])
-                kept[split][0] += 1
-
-        zip_path = out / f"{split}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for f in (out / out_split).glob("*"):
-                z.write(f, f.name)
-
-        print(f"[{split:5s}] annotated={kept[split][0]} negative(no-box)={kept[split][1]} "
-              f"-> {zip_path} + {out / (split + '.csv')}")
+    if args.format == "yolo-txt":
+        pack_yolo_txt(args, names, splits)
+    else:
+        pack_csv(args, names, splits)
 
     print()
-    print("Upload to Edge Impulse (Create / Object Detection / FOMO):")
-    for split in ("train", "test"):
-        print(f"  1. {out / (split + '.zip')}")
-        print(f"  2. {out / (split + '.csv')}  (label = column above)")
+    if args.format == "yolo-txt":
+        print("Edge Impulse upload (labeling method: Bounding boxes):")
+        print(f"  1. {out / 'train.zip'}  -> format 'YOLO TXT', category 'training'")
+        print(f"  2. {out / 'test.zip'}   -> format 'YOLO TXT', category 'testing'")
+        print("  Both zips already contain classes.txt + data.yaml; no CSV Wizard.")
+        print("  Confirm both classes appear on the Data acquisition page after upload.")
+    else:
+        print("Edge Impulse upload (Plain CSV - map columns in the CSV Wizard):")
+        for split in ("train", "test"):
+            print(f"  1. {out / (split + '.zip')}")
+            print(f"  2. {out / (split + '.csv')}")
+    print()
+    print(f"Impulse: Image {args.target_size}x{args.target_size} RGB -> "
+          f"Object Detection (FOMO-MobileNetV2 0.35), learning rate 0.001")
 
 
 if __name__ == "__main__":

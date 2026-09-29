@@ -25,9 +25,12 @@
 #include "inference_service.h"
 
 /* Input geometry. A real export defines these in model_parameters.h; the
- * fallbacks keep the stub build working without the SDK. */
-#define EI_INPUT_W_FALLBACK 96
-#define EI_INPUT_H_FALLBACK 96
+ * fallbacks keep the stub build working without the SDK. 160x160 is the
+ * intended Edge Impulse model size: FOMO emits a 1/8-scale heat map (20x20),
+ * and the 10th-percentile feces blob in our dataset is ~5px at 96x96 but ~8.8px
+ * at 160x160. Below ~one heat-map cell an object is effectively unsupervised. */
+#define EI_INPUT_W_FALLBACK 160
+#define EI_INPUT_H_FALLBACK 160
 
 /* Minimum FOMO cell score for a box to be reported as a detection. FOMO
  * scores are per-cell and typically want ~0.4-0.6, not 0.8 like an

@@ -7,10 +7,11 @@ Tick items off as they complete. Workflows for each step are in `docs/setup-guid
 ## Phase 1 — Dataset
 
 - [ ] Captured ~300-800 images, ~50% with feces, ~50% background
-- [ ] Images labeled in YOLO format (class: `feces`) using LabelImg or Roboflow
+- [ ] Images labeled in YOLO format, 2 classes (`feces`, `pig`) using LabelImg or Roboflow
 - [ ] Dataset split: 80% train, 20% val
 - [ ] Labels placed in `dataset/labels/train/` and `dataset/labels/val/`
-- [ ] Dataset converted for FOMO: `python training/fomo/prepare_dataset.py --target-size 96`
+- [ ] Colab zip rebuilt as 2-class: `python training/pack_colab_zip.py`
+- [ ] Dataset packed for FOMO: `python training/fomo/prepare_dataset.py --format yolo-txt`
 
 ## Phase 2 — On-device model (Edge Impulse FOMO)
 
