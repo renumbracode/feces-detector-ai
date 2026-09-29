@@ -265,26 +265,35 @@ static void prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     esp_err_t e = esp_http_client_perform(c);
     if (e != ESP_OK) {
         ESP_LOGD(TAG, "verify poll failed: %s", esp_err_to_name(e));
-    } else if (sink.len > 0) {
-        verify_result_t v = { 0 };
-        v.valid = true;
-        v.detected = prv_parse_bool_key(body, "detected");
-        v.conf = prv_parse_float_key(body, "yolo_conf");
-        if (!prv_parse_box_norm(body, &v.x, &v.y, &v.w, &v.h)) {
-            /* Server saw something but no target box (or the reply was cut
-             * short); fall back to a centred square so the overlay can still
-             * show a definite green/red answer. */
-            v.x = 0.3f; v.y = 0.3f; v.w = 0.4f; v.h = 0.4f;
+    } else {
+        /* esp_http_client_perform() returns ESP_OK for 4xx/5xx too, so without
+         * this check a rejected frame (the server answers 400 for an empty or
+         * undecodable JPEG) would be published as a confident "no feces"
+         * result. Only a 2xx is a real answer. */
+        int status = esp_http_client_get_status_code(c);
+        if (status < 200 || status >= 300) {
+            ESP_LOGD(TAG, "verify poll rejected: HTTP %d", status);
+        } else if (sink.len > 0) {
+            verify_result_t v = { 0 };
+            v.valid = true;
+            v.detected = prv_parse_bool_key(body, "detected");
+            v.conf = prv_parse_float_key(body, "yolo_conf");
+            if (!prv_parse_box_norm(body, &v.x, &v.y, &v.w, &v.h)) {
+                /* Server saw something but no target box (or the reply was cut
+                 * short); fall back to a centred square so the overlay can
+                 * still show a definite green/red answer. */
+                v.x = 0.3f; v.y = 0.3f; v.w = 0.4f; v.h = 0.4f;
+            }
+
+            if (s_verify_mux) xSemaphoreTake(s_verify_mux, portMAX_DELAY);
+            s_verify = v;
+            s_verify_ms = esp_timer_get_time() / 1000;
+            if (s_verify_mux) xSemaphoreGive(s_verify_mux);
+
+            ESP_LOGD(TAG, "verify poll: detected=%d conf=%.3f box=%.2f,%.2f %.2fx%.2f",
+                     (int)v.detected, (double)v.conf, (double)v.x, (double)v.y,
+                     (double)v.w, (double)v.h);
         }
-
-        if (s_verify_mux) xSemaphoreTake(s_verify_mux, portMAX_DELAY);
-        s_verify = v;
-        s_verify_ms = esp_timer_get_time() / 1000;
-        if (s_verify_mux) xSemaphoreGive(s_verify_mux);
-
-        ESP_LOGD(TAG, "verify poll: detected=%d conf=%.3f box=%.2f,%.2f %.2fx%.2f",
-                 (int)v.detected, (double)v.conf, (double)v.x, (double)v.y,
-                 (double)v.w, (double)v.h);
     }
     esp_http_client_cleanup(c);
 }

@@ -40,13 +40,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const GREEN_HOLD_MS = 4000;
   let lastGreenAt = 0;
 
+  // A verifier answer is only trusted while it is fresh. The device polls the
+  // verifier every 2 s and reports how old the answer is in vrf.ageMs, so an
+  // answer older than this means the verifier stopped answering (crashed, PC
+  // asleep, network down) rather than the pen actually being clean. Without
+  // this the last "no feces" would stay on screen indefinitely.
+  const VRF_STALE_MS = 6000;
+
   function applyDetector(j) {
     j = j || {};
     const now = Date.now();
     const v = j.vrf;
     /* Until a real FOMO model is exported the device reports fomo:stub, so the
      * server-side YOLOv8 answer (vrf) is the only real detection available. */
-    const useVrf = !!(v && v.valid);
+    /* An answer the device can no longer refresh is not evidence of anything,
+     * so treat it as absent and let the on-device fallback take over. */
+    const vrfStale = !!(v && v.valid && Number(v.ageMs) > VRF_STALE_MS);
+    const vrfFresh = !!(v && v.valid && !vrfStale);
+    const useVrf = vrfFresh;
 
     let detected, conf, box, present, isPig = false;
     if (useVrf) {
@@ -82,10 +93,16 @@ document.addEventListener('DOMContentLoaded', () => {
     box.style.top = f(gy);
     box.style.width = f(gw);
     box.style.height = f(gh);
-    labelEl.textContent = isGreen
-      ? 'FECES ' + Math.round(conf * 100) + '%'
-      : (isPig ? 'PIG' : 'NO FECES');
-    return { isGreen, detected, isPig, present, useVrf, conf };
+    /* Say "no answer" rather than "no feces" when the verifier is unreachable.
+     * Those are different claims, and only the first one is true. */
+    if (vrfStale) {
+      labelEl.textContent = 'VERIFY OFFLINE';
+    } else {
+      labelEl.textContent = isGreen
+        ? 'FECES ' + Math.round(conf * 100) + '%'
+        : (isPig ? 'PIG' : 'NO FECES');
+    }
+    return { isGreen, detected, isPig, present, useVrf, conf, vrfStale };
   }
 
   // ----- WebAudio: green chime on onset, red beeps while non-feces -----
