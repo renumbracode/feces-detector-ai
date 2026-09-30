@@ -117,6 +117,131 @@
     return parts.join('');
   }
 
+  /* ----- shared detection signal -----
+   * The overlay on the live page and the alert sound elsewhere both need to
+   * answer one question -- "does this frame contain feces?" -- from the same
+   * rules. Keeping the rules here is what stops the picture and the sound from
+   * disagreeing about the same frame.
+   *
+   * A verifier answer is only trusted while it is fresh. The device polls the
+   * verifier every 2 s and reports how old the answer is in vrf.ageMs, so an
+   * answer older than this means the verifier stopped answering (crashed, PC
+   * asleep, network down) rather than the pen actually being clean. Without
+   * this the last "no feces" would stay on screen indefinitely. */
+  const VRF_STALE_MS = 6000;
+
+  function fecesSignal(j) {
+    j = j || {};
+    const v = j.vrf;
+    const vrfStale = !!(v && v.valid && Number(v.ageMs) > VRF_STALE_MS);
+    const vrfFresh = !!(v && v.valid && !vrfStale);
+    /* Until a real FOMO model is exported the device reports fomo:stub, so the
+     * server-side YOLOv8 answer (vrf) is the only real detection available. */
+    if (vrfFresh) {
+      return {
+        detected: !!v.detected,
+        conf: Number(v.conf || 0),
+        present: true,
+        isPig: false,
+        useVrf: true,
+        vrfStale: false,
+        boxData: v,
+      };
+    }
+    /* The verifier is not answering, so fall back to the on-device FOMO class. */
+    const present = !!j.objectPresent && typeof j.classId === 'number' && j.classId >= 0;
+    return {
+      detected: present && j.classId === 0,
+      conf: Number(j.lastConfidence || 0),
+      present: present,
+      isPig: present && j.classId === 1,
+      useVrf: false,
+      vrfStale: vrfStale,
+      boxData: j.box,
+    };
+  }
+
+  /* ----- alert sounds -----
+   * WebAudio only, no asset files: two short oscillators per sound is enough
+   * for a pen alarm and keeps the dashboard a single-script page.
+   *
+   * Browsers refuse to start audio until a user gesture, so the alerter starts
+   * disarmed and is unlocked by the opt-in button. */
+  const RETRIGGER_GAP_MS = 8000;
+
+  function createAlerter(opts) {
+    opts = opts || {};
+    const btn = opts.button ? qs(opts.button) : null;
+
+    let actx = null;
+    const ctx = () => {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+      return actx;
+    };
+    const tone = (freq, dur, type, gain, when) => {
+      const a = ctx();
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.exponentialRampToValueAtTime(gain, when + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+      o.connect(g); g.connect(a.destination);
+      o.start(when); o.stop(when + dur + 0.03);
+    };
+    const chime = () => {
+      const t = ctx().currentTime;
+      tone(880, 0.35, 'sine', 0.18, t);
+      tone(1320, 0.5, 'sine', 0.14, t + 0.09);
+    };
+    const warnBuzzer = () => {
+      const t = ctx().currentTime;
+      tone(190, 0.16, 'square', 0.10, t);
+      tone(150, 0.16, 'square', 0.10, t + 0.22);
+    };
+
+    let audioOn = false;
+    /* Latch rather than plain edge detection: one detection episode is one
+     * chime, however many polls span it. `armed` only returns true once the
+     * signal has gone clear again. The gap floor covers the case where the
+     * verifier flickers clear/hit faster than a human can reset it. */
+    let armed = true;
+    let lastChimeAt = 0;
+
+    if (btn) {
+      btn.addEventListener('click', (e) => {
+        e.target.blur();
+        ctx();
+        audioOn = !audioOn;
+        e.target.textContent = audioOn ? '🔇 Sound off' : '🔊 Sound on';
+        e.target.title = audioOn ? 'Disable detection sounds' : 'Enable detection sounds';
+      });
+    }
+
+    return {
+      /* Returns the signal so a caller can reuse it instead of recomputing. */
+      update: function (j, sig) {
+        const s = sig || fecesSignal(j);
+        /* The pig warning is a presence alarm, so it keys off `isPig` and not
+         * off `detected`: a pig frame is never `detected` (detected means the
+         * feces class), so gating it on that would make it unreachable. */
+        if (opts.pigBuzzer && s.isPig && audioOn) warnBuzzer();
+        if (!s.detected) {
+          armed = true;
+        } else {
+          const now = Date.now();
+          if (audioOn && armed && (now - lastChimeAt) >= RETRIGGER_GAP_MS) {
+            chime();
+            lastChimeAt = now;
+            armed = false;
+          }
+        }
+        return s;
+      },
+    };
+  }
+
   function initStatusPoll(opts) {
     const chipsEl = qs(opts.chipsEl);
     const bannerEl = opts.bannerEl ? qs(opts.bannerEl) : null;
@@ -195,7 +320,7 @@
     setInterval(tick, interval || 10000);
   }
 
-  window.__dash = { toast, initStatusPoll, initDashboardRefresh };
+  window.__dash = { toast, initStatusPoll, initDashboardRefresh, fecesSignal, createAlerter };
 
   document.addEventListener('DOMContentLoaded', () => {
     initClock();

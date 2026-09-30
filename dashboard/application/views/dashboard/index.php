@@ -1,6 +1,19 @@
 <?php
 defined('BASEPATH') OR exit('No direct script access allowed');
 ?>
+<section class="panel">
+  <div class="panel-head">
+    <h3 class="panel-title">Device alert</h3>
+    <span class="muted" style="margin-left:auto">chimes on detection, even with the live view closed</span>
+    <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Toggle detection sounds">🔊 Sound on</button>
+  </div>
+  <div class="panel-body">
+    <div class="row">
+      <div class="status-chips" id="status-chips"></div>
+    </div>
+  </div>
+</section>
+
 <section class="cards">
   <div class="card">
     <div class="card-icon green">
@@ -148,5 +161,19 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 
 <script>
 const LATEST_URL = <?= json_encode(site_url('api/latest')) ?>;
-document.addEventListener('DOMContentLoaded', () => __dash.initDashboardRefresh(LATEST_URL, 10000));
+const STATUS_URL = <?= json_encode($statusUrl) ?>;
+document.addEventListener('DOMContentLoaded', () => {
+  __dash.initDashboardRefresh(LATEST_URL, 10000);
+
+  /* Same chime as the live view, driven by the same detection rules from
+   * main.js, so a detection alerts whether or not anyone is watching the
+   * stream. No pig buzzer here: this page has no live frame to point at. */
+  const alerter = __dash.createAlerter({ button: '#btn-sound' });
+  __dash.initStatusPoll({
+    url: STATUS_URL,
+    chipsEl: '#status-chips',
+    interval: 2000,
+    onUpdate: (j) => alerter.update(j),
+  });
+});
 </script>

@@ -11,6 +11,9 @@ class Dashboard extends MY_Controller
         $data['latest'] = $this->Detection_model->latest();
         $data['recent'] = $this->Detection_model->recent(10);
         $data['settings'] = $this->Setting_model->all();
+        /* The dashboard alerts on the device status even when the live view is
+         * closed, so it needs the same status endpoint the live page polls. */
+        $data['statusUrl'] = $this->status_url();
 
         $this->load->view('dashboard/index', $data);
         $this->load->view('partials/footer');

@@ -40,41 +40,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const GREEN_HOLD_MS = 4000;
   let lastGreenAt = 0;
 
-  // A verifier answer is only trusted while it is fresh. The device polls the
-  // verifier every 2 s and reports how old the answer is in vrf.ageMs, so an
-  // answer older than this means the verifier stopped answering (crashed, PC
-  // asleep, network down) rather than the pen actually being clean. Without
-  // this the last "no feces" would stay on screen indefinitely.
-  const VRF_STALE_MS = 6000;
+  /* The detection rules live in main.js so the overlay here and the alert sound
+   * on any other page read the same frame the same way. */
+  const alerter = __dash.createAlerter({ button: '#btn-sound', pigBuzzer: true });
 
   function applyDetector(j) {
-    j = j || {};
     const now = Date.now();
-    const v = j.vrf;
-    /* Until a real FOMO model is exported the device reports fomo:stub, so the
-     * server-side YOLOv8 answer (vrf) is the only real detection available. */
-    /* An answer the device can no longer refresh is not evidence of anything,
-     * so treat it as absent and let the on-device fallback take over. */
-    const vrfStale = !!(v && v.valid && Number(v.ageMs) > VRF_STALE_MS);
-    const vrfFresh = !!(v && v.valid && !vrfStale);
-    const useVrf = vrfFresh;
-
     /* `boxData` is the reported geometry; `box` (above) is the overlay div.
      * Keeping them distinct matters: writing classList/style onto the plain
      * JSON object throws, and that used to surface as "device unreachable". */
-    let detected, conf, boxData, present, isPig = false;
-    if (useVrf) {
-      detected = !!v.detected;
-      conf = Number(v.conf || 0);
-      boxData = v;
-      present = true;
-    } else {
-      present = !!j.objectPresent && typeof j.classId === 'number' && j.classId >= 0;
-      detected = present && j.classId === 0;
-      isPig = present && j.classId === 1;
-      conf = Number(j.lastConfidence || 0);
-      boxData = j.box;
-    }
+    const s = __dash.fecesSignal(j);
+    const { detected, conf, present, isPig, useVrf, vrfStale, boxData } = s;
 
     if (detected) lastGreenAt = now;
     const isGreen = (now - lastGreenAt) < GREEN_HOLD_MS;
@@ -105,49 +81,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ? 'FECES ' + Math.round(conf * 100) + '%'
         : (isPig ? 'PIG' : 'NO FECES');
     }
-    return { isGreen, detected, isPig, present, useVrf, conf, vrfStale };
+    return { isGreen, detected, isPig, present, useVrf, conf, vrfStale, boxData };
   }
-
-  // ----- WebAudio: green chime on onset, red beeps while non-feces -----
-  let actx = null;
-  const ctx = () => {
-    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === 'suspended') actx.resume();
-    return actx;
-  };
-  const tone = (freq, dur, type, gain, when) => {
-    const a = ctx();
-    const o = a.createOscillator();
-    const g = a.createGain();
-    o.type = type; o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.exponentialRampToValueAtTime(gain, when + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
-    o.connect(g); g.connect(a.destination);
-    o.start(when); o.stop(when + dur + 0.03);
-  };
-  const chime = () => {
-    const t = ctx().currentTime;
-    tone(880, 0.35, 'sine', 0.18, t);
-    tone(1320, 0.5, 'sine', 0.14, t + 0.09);
-  };
-  const warnBuzzer = () => {
-    const t = ctx().currentTime;
-    tone(190, 0.16, 'square', 0.10, t);
-    tone(150, 0.16, 'square', 0.10, t + 0.22);
-  };
-
-  let audioOn = false;
-  let prevFeces = false;
-  let prevSprayActive = false;
-
-  document.getElementById('btn-sound').addEventListener('click', (e) => {
-    e.target.blur();
-    ctx();
-    audioOn = !audioOn;
-    e.target.textContent = audioOn ? '🔇 Sound off' : '🔊 Sound on';
-    e.target.title = audioOn ? 'Disable detection sounds' : 'Enable detection sounds';
-  });
 
   __dash.initStatusPoll({
     url: STATUS_URL,
@@ -156,22 +91,18 @@ document.addEventListener('DOMContentLoaded', () => {
     interval: 1500,
     onUpdate: (j) => {
       const st = applyDetector(j);
-
-      /* The alarm chime is keyed to the device actually firing its spray, not
-       * to a loose detection. Chiming on any detection desynced the sound from
-       * the hardware: the browser would chirp on verifier confidence while the
-       * breadboard buzzer stayed silent below the 0.60 gate. Driving both from
-       * sprayActive makes them agree by construction.
-       * The red/green overlay deliberately keeps the more sensitive verifier
-       * signal -- only the audio needed to match hardware. */
-      const sprayActive = !!j.sprayActive;
-      if (audioOn) {
-        if (sprayActive && !prevSprayActive) chime();
-        if (st.present && st.isPig) warnBuzzer();
-      }
-      prevSprayActive = sprayActive;
-
-      prevFeces = st.detected;
+      /* The chime is keyed to the same detection that turns the box green, not
+       * to sprayActive. sprayActive is gated by threshold and a 300 s cooldown,
+       * so keying audio to it left the laptop silent for minutes at a time
+       * while feces were plainly on screen -- the operator watching the laptop
+       * was told nothing at all.
+       *
+       * This does mean the laptop can chime when the breadboard stays quiet
+       * during cooldown. That is the intended trade: the screen and the sound
+       * agree with each other, and the buzzer keeps reporting what the hardware
+       * actually did. The one chime per detection episode is latched in
+       * createAlerter, so a steady detection does not machine-gun. */
+      alerter.update(j, st);
     }
   });
 
