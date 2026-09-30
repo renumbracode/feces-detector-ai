@@ -12,6 +12,7 @@
 export IDF_TOOLS_PATH="C:\\Espressif"
 export IDF_PATH="C:\\Espressif\\frameworks\\esp-idf-v5.5.5"
 export IDF_PYTHON_ENV_PATH="C:\\Espressif\\python_env\\idf5.5_py3.11_env"
+export ESP_ROM_ELF_DIR="C:\\Espressif\\tools\\esp-rom-elfs\\20241011"
 
 T="/c/Espressif/tools"
 

@@ -29,6 +29,9 @@ firmware/esp32s3_fomo/components/inference/edge_impulse/*
 !firmware/esp32s3_fomo/components/inference/edge_impulse/.gitkeep
 !firmware/esp32s3_fomo/components/inference/edge_impulse/README.md
 
+# Edge Impulse export archives (unpacked into the gitignored SDK folder)
+*impulse-#1.zip
+
 # Ultralytics label caches (regenerated on every val run)
 *.cache
 
