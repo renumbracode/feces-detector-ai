@@ -4,7 +4,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 <section class="panel">
   <div class="panel-head">
     <h3 class="panel-title">Device alert</h3>
-    <span class="muted" style="margin-left:auto">chimes on detection, even with the live view closed</span>
+    <span class="muted" style="margin-left:auto">alarms on detection, even with the live view closed</span>
     <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Toggle detection sounds">🔊 Sound on</button>
   </div>
   <div class="panel-body">
@@ -165,7 +165,7 @@ const STATUS_URL = <?= json_encode($statusUrl) ?>;
 document.addEventListener('DOMContentLoaded', () => {
   __dash.initDashboardRefresh(LATEST_URL, 10000);
 
-  /* Same chime as the live view, driven by the same detection rules from
+  /* Same alarm as the live view, driven by the same detection rules from
    * main.js, so a detection alerts whether or not anyone is watching the
    * stream. No pig buzzer here: this page has no live frame to point at. */
   const alerter = __dash.createAlerter({ button: '#btn-sound' });

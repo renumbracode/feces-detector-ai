@@ -190,10 +190,27 @@
       o.connect(g); g.connect(a.destination);
       o.start(when); o.stop(when + dur + 0.03);
     };
-    const chime = () => {
+    /* Feces alarm: the old chime was two overlapping tones lasting ~0.6 s, which
+     * is easy to miss from across a pig barn or over a pump relay clatter. Four
+     * repeats of that same two-tone pair over ~5 s reads as an alarm instead of
+     * a blip, and keeps the original timbre so it stays recognisable.
+     *
+     * Scheduling is the point. Every burst is handed to the AudioContext clock
+     * up front, so the pattern is sample-accurate with no timers, and nothing is
+     * left running afterwards: each oscillator self-stops at when + dur + 0.03.
+     * That is why this is a bounded motif rather than a loop-until-clear, which
+     * would have to stop itself and so could outlive the signal that started it. */
+    const ALARM_BURSTS = 4;
+    const ALARM_SPACING = 1.35;   /* seconds between burst starts */
+    const ALARM_TAIL = 0.09;      /* second tone's offset inside a burst */
+
+    const fecesAlarm = () => {
       const t = ctx().currentTime;
-      tone(880, 0.35, 'sine', 0.18, t);
-      tone(1320, 0.5, 'sine', 0.14, t + 0.09);
+      for (let i = 0; i < ALARM_BURSTS; i++) {
+        const at = t + i * ALARM_SPACING;
+        tone(880, 0.35, 'sine', 0.18, at);
+        tone(1320, 0.5, 'sine', 0.14, at + ALARM_TAIL);
+      }
     };
     const warnBuzzer = () => {
       const t = ctx().currentTime;
@@ -203,11 +220,14 @@
 
     let audioOn = false;
     /* Latch rather than plain edge detection: one detection episode is one
-     * chime, however many polls span it. `armed` only returns true once the
+     * alarm, however many polls span it. `armed` only returns true once the
      * signal has gone clear again. The gap floor covers the case where the
-     * verifier flickers clear/hit faster than a human can reset it. */
+     * verifier flickers clear/hit faster than a human can reset it. This matters
+     * more now that one alarm lasts ~5 s: without the latch a sustained
+     * detection would schedule a fresh alarm every poll for as long as the pen
+     * stayed dirty. */
     let armed = true;
-    let lastChimeAt = 0;
+    let lastAlarmAt = 0;
 
     if (btn) {
       btn.addEventListener('click', (e) => {
@@ -216,6 +236,12 @@
         audioOn = !audioOn;
         e.target.textContent = audioOn ? '🔇 Sound off' : '🔊 Sound on';
         e.target.title = audioOn ? 'Disable detection sounds' : 'Enable detection sounds';
+        /* Play the alarm once on enable so the operator can hear the tone,
+         * length and loudness immediately rather than waiting for a real
+         * detection to judge them. Deliberately does not touch `armed` or
+         * `lastAlarmAt`: a preview must not consume the one alarm a detection
+         * episode is allowed, or a hit arriving seconds later would go silent. */
+        if (audioOn) fecesAlarm();
       });
     }
 
@@ -231,9 +257,9 @@
           armed = true;
         } else {
           const now = Date.now();
-          if (audioOn && armed && (now - lastChimeAt) >= RETRIGGER_GAP_MS) {
-            chime();
-            lastChimeAt = now;
+          if (audioOn && armed && (now - lastAlarmAt) >= RETRIGGER_GAP_MS) {
+            fecesAlarm();
+            lastAlarmAt = now;
             armed = false;
           }
         }

@@ -91,17 +91,18 @@ document.addEventListener('DOMContentLoaded', () => {
     interval: 1500,
     onUpdate: (j) => {
       const st = applyDetector(j);
-      /* The chime is keyed to the same detection that turns the box green, not
+      /* The alarm is keyed to the same detection that turns the box green, not
        * to sprayActive. sprayActive is gated by threshold and a 300 s cooldown,
        * so keying audio to it left the laptop silent for minutes at a time
        * while feces were plainly on screen -- the operator watching the laptop
        * was told nothing at all.
        *
-       * This does mean the laptop can chime when the breadboard stays quiet
+       * This does mean the laptop can alarm when the breadboard stays quiet
        * during cooldown. That is the intended trade: the screen and the sound
        * agree with each other, and the buzzer keeps reporting what the hardware
-       * actually did. The one chime per detection episode is latched in
-       * createAlerter, so a steady detection does not machine-gun. */
+       * actually did. The one alarm per detection episode is latched in
+       * createAlerter, so a steady detection does not machine-gun -- which
+       * matters more now that a single alarm runs ~5 s. */
       alerter.update(j, st);
     }
   });
