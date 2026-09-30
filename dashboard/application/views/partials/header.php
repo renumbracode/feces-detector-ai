@@ -8,7 +8,14 @@ $pageSlug = isset($pageSlug) ? $pageSlug : 'dashboard';
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= htmlspecialchars($pageTitle) ?> · Pigpen Feces Detector</title>
-<link rel="stylesheet" href="<?= base_url('assets/css/style.css') ?>">
+<?php /* filemtime() so a deploy cannot leave a browser holding a stale copy of
+       * the CSS. Without it the URL never changes and the browser is free to
+       * reuse the old file, which silently outdates the markup that uses it.
+       * The @ and the ?: guard keep a missing asset from warning mid-render. */
+$cssPath = FCPATH . 'assets/css/style.css';
+$cssVer  = @filemtime($cssPath) ?: '0';
+?>
+<link rel="stylesheet" href="<?= base_url('assets/css/style.css') ?>?v=<?= $cssVer ?>">
 </head>
 <body>
 <button class="sidebar-backdrop" id="sidebar-backdrop" type="button" aria-label="Close menu"></button>

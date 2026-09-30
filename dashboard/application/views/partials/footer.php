@@ -10,6 +10,13 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 </div>
 
 <div class="toasts" id="toasts"></div>
-<script src="<?= base_url('assets/js/main.js') ?>"></script>
+<?php /* Versioned for the same reason as the CSS in header.php, and it matters
+       * more here: main.js gains exports (fecesSignal, createAlerter) that the
+       * views call at load time, so a cached older copy makes every view throw
+       * before it draws. See the cache-busting note in header.php. */
+$jsPath = FCPATH . 'assets/js/main.js';
+$jsVer  = @filemtime($jsPath) ?: '0';
+?>
+<script src="<?= base_url('assets/js/main.js') ?>?v=<?= $jsVer ?>"></script>
 </body>
 </html>
