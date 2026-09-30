@@ -80,12 +80,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const isGreen = (now - lastGreenAt) < GREEN_HOLD_MS;
 
     // Fall back to a centred square so the red state is still a real frame.
-    const hasGeom = box && (Number(box.w) > 0.001 || Number(box.h) > 0.001);
+    const hasGeom = boxData && (Number(boxData.w) > 0.001 || Number(boxData.h) > 0.001);
     const f = (n) => Math.round(Math.max(0, Math.min(1, Number(n) || 0)) * 100) + '%';
-    const gx = hasGeom ? box.x : 0.30;
-    const gy = hasGeom ? box.y : 0.30;
-    const gw = hasGeom ? box.w : 0.40;
-    const gh = hasGeom ? box.h : 0.40;
+    const gx = hasGeom ? boxData.x : 0.30;
+    const gy = hasGeom ? boxData.y : 0.30;
+    const gw = hasGeom ? boxData.w : 0.40;
+    const gh = hasGeom ? boxData.h : 0.40;
 
     stage.classList.toggle('stage-feces', isGreen);
     stage.classList.toggle('stage-other', !isGreen);
@@ -139,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let audioOn = false;
   let prevFeces = false;
+  let prevSprayActive = false;
 
   document.getElementById('btn-sound').addEventListener('click', (e) => {
     e.target.blur();
@@ -155,13 +156,21 @@ document.addEventListener('DOMContentLoaded', () => {
     interval: 1500,
     onUpdate: (j) => {
       const st = applyDetector(j);
-      if (!st.present) { prevFeces = false; return; }
+
+      /* The alarm chime is keyed to the device actually firing its spray, not
+       * to a loose detection. Chiming on any detection desynced the sound from
+       * the hardware: the browser would chirp on verifier confidence while the
+       * breadboard buzzer stayed silent below the 0.60 gate. Driving both from
+       * sprayActive makes them agree by construction.
+       * The red/green overlay deliberately keeps the more sensitive verifier
+       * signal -- only the audio needed to match hardware. */
+      const sprayActive = !!j.sprayActive;
       if (audioOn) {
-        if (st.detected && !prevFeces) chime();
-        /* warnBuzzer only for a positively identified pig, which needs a real
-         * 2-class FOMO model. The interim red state stays silent. */
-        if (st.isPig) warnBuzzer();
+        if (sprayActive && !prevSprayActive) chime();
+        if (st.present && st.isPig) warnBuzzer();
       }
+      prevSprayActive = sprayActive;
+
       prevFeces = st.detected;
     }
   });
