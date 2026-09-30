@@ -59,18 +59,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const vrfFresh = !!(v && v.valid && !vrfStale);
     const useVrf = vrfFresh;
 
-    let detected, conf, box, present, isPig = false;
+    /* `boxData` is the reported geometry; `box` (above) is the overlay div.
+     * Keeping them distinct matters: writing classList/style onto the plain
+     * JSON object throws, and that used to surface as "device unreachable". */
+    let detected, conf, boxData, present, isPig = false;
     if (useVrf) {
       detected = !!v.detected;
       conf = Number(v.conf || 0);
-      box = v;
+      boxData = v;
       present = true;
     } else {
       present = !!j.objectPresent && typeof j.classId === 'number' && j.classId >= 0;
       detected = present && j.classId === 0;
       isPig = present && j.classId === 1;
       conf = Number(j.lastConfidence || 0);
-      box = j.box;
+      boxData = j.box;
     }
 
     if (detected) lastGreenAt = now;

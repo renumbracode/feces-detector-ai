@@ -122,17 +122,25 @@
     const bannerEl = opts.bannerEl ? qs(opts.bannerEl) : null;
     const onUpdate = typeof opts.onUpdate === 'function' ? opts.onUpdate : null;
     if (!chipsEl) return;
+    /* A throw inside onUpdate is a bug in the view, not a dead device. Keep it
+     * out of the network try so it can never paint the "unreachable" banner
+     * while the detector is answering perfectly. */
+    function publish(j) {
+      if (!onUpdate) return;
+      try { onUpdate(j); }
+      catch (err) { console.warn('status onUpdate failed', err); }
+    }
     async function tick() {
       try {
         const res = await fetch(opts.url);
         if (!res.ok) throw new Error(res.status);
         const j = await res.json();
         chipsEl.innerHTML = statusChips(j);
-        if (onUpdate) onUpdate(j);
+        publish(j);
         if (bannerEl) bannerEl.hidden = true;
       } catch (err) {
         chipsEl.innerHTML = '<span class="chip chip-off">Device unreachable</span>';
-        if (onUpdate) onUpdate(null);
+        publish(null);
         if (bannerEl) bannerEl.hidden = false;
       }
     }
