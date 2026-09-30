@@ -14,8 +14,15 @@ endif()
 idf_component_register(
     SRCS
         "inference_service.c"
-        "edge_impulse_invoke.c"
+        "edge_impulse_invoke.cpp"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS ${_ei_inc_dirs}
     REQUIRES espressif__esp32-camera espressif__esp_jpeg freertos esp_system esp_timer ${_ei_reqs}
+)
+
+# edge_impulse_invoke.cpp includes the EI SDK headers; keep -Werror=all on but
+# demote the spurious uninitialized diagnostics the export triggers.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    "-Wno-error=uninitialized"
+    "-Wno-error=maybe-uninitialized"
 )

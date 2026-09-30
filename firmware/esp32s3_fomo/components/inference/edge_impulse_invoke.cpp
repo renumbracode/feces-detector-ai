@@ -18,11 +18,18 @@
  *   A 1-class export (fecies only) is treated as class 0 throughout.
  */
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
 
+/* The EI SDK headers are C++; this file is compiled as C++. Only the five
+ * functions below are consumed by C callers, so they get C linkage. inference
+ * _service.h is a plain C header; the extern "C" mismatch header between the
+ * C structs and the future C++ SDK includes. */
+extern "C" {
 #include "inference_service.h"
+}
 
 /* Input geometry. A real export defines these in model_parameters.h; the
  * fallbacks keep the stub build working without the SDK. 160x160 is the
@@ -37,11 +44,14 @@
  * clears 0.30 becomes a candidate, and the runtime spray dial (web /config
  * -> threshold, NVS-backed) makes the final spray decision. Keeping the floor
  * below the dial range is deliberate -- a floor above the dial would silently
- * drop detections the dial could otherwise accept. */
+ * drop detections the dial could otherwise accept. NOTE: the exported model's
+ * own FOMO post-process (model_variables.h: ei_fill_result_fomo_i8_config_*
+ * .threshold) already drops boxes below 0.5, so the effective presentation
+ * floor is really 0.5 unless that generated constant is lowered and rebuilt. */
 #define EI_FOMO_PRESENT_THRESHOLD 0.30f
 
 #if defined(__has_include)
-#  if __has_include("edge_impulse_capsrd.h")
+#  if __has_include("edge-impulse-sdk/classifier/ei_run_classifier.h")
 #    define EI_SDK_PRESENT 1
 #  endif
 #endif
@@ -58,7 +68,7 @@
 
 static const char *TAG = "ei_invoke";
 
-int edge_impulse_input_width(void)
+extern "C" int edge_impulse_input_width(void)
 {
 #if EI_SDK_PRESENT
     return EI_CLASSIFIER_INPUT_WIDTH;
@@ -67,7 +77,7 @@ int edge_impulse_input_width(void)
 #endif
 }
 
-int edge_impulse_input_height(void)
+extern "C" int edge_impulse_input_height(void)
 {
 #if EI_SDK_PRESENT
     return EI_CLASSIFIER_INPUT_HEIGHT;
@@ -78,17 +88,17 @@ int edge_impulse_input_height(void)
 
 /* Fixed box-presentation floor (see EI_FOMO_PRESENT_THRESHOLD). Exposed so
  * the inference service can log the real gate instead of a stale constant. */
-float edge_impulse_present_threshold(void)
+extern "C" float edge_impulse_present_threshold(void)
 {
     return (float)EI_FOMO_PRESENT_THRESHOLD;
 }
 
 /* Honest model id for /status + dashboard logging so the panel is never
  * misled about what is actually running on the device. */
-const char *edge_impulse_model_tag(void)
+extern "C" const char *edge_impulse_model_tag(void)
 {
 #if EI_SDK_PRESENT
-#  if EI_CLASSIFIER_NUMBER_OF_CLASSES == 2
+#  if EI_CLASSIFIER_LABEL_COUNT == 2
     return "fomo:2class";
 #  else
     return "fomo:1class";
@@ -135,24 +145,21 @@ static bool prv_run_stub(const uint8_t *input_rgb888, int w, int h,
 
 #if EI_SDK_PRESENT
 
-/* RGB888 -> int8 input tensor exactly as the export's DSP block expects.
- * Edge Impulse int8 images are centred on 0 with a 1/255 or 1/127.5 scale;
- * the int8 tensor from the standard mobile-net preprocessing is px-128. */
-static void prv_fill_tensor(const uint8_t *rgb888, int w, int h,
-                            int16_t *buf)
+/* Pack each RGB888 pixel as 0x00RRGGBB into one float sample, exactly as the
+ * export's Image DSP (extract_image_features) expects: it casts every signal
+ * sample back to uint32 and splits r/g/b itself. 0x00RRGGBB is exact in float
+ * (integers up to 2^24), so the round-trip is lossless. One sample per pixel,
+ * at model resolution -- the caller (inference_service.c) has already resized
+ * the frame to EI_CLASSIFIER_INPUT_WIDTH/HEIGHT. No luma or centre-on-zero
+ * scaling here: this export's DSP is a plain image pass-through, and the model
+ * owns its own normalisation (IMAGE_SCALING_NONE). */
+static void prv_fill_tensor(const uint8_t *rgb888, int w, int h, float *buf)
 {
-    const int ch = EI_CLASSIFIER_INPUT_CHANNELS;
     for (int i = 0; i < w * h; i++) {
-        const int16_t r = rgb888[i * 3 + 0];
-        const int16_t g = rgb888[i * 3 + 1];
-        const int16_t b = rgb888[i * 3 + 2];
-        if (ch == 1) {
-            buf[i] = (int16_t)((EI_DNN_INPUT_SCALE * (0.299f * r + 0.587f * g + 0.114f * b)));
-        } else {
-            buf[i * 3 + 0] = (int16_t)(r - 128);
-            buf[i * 3 + 1] = (int16_t)(g - 128);
-            buf[i * 3 + 2] = (int16_t)(b - 128);
-        }
+        uint32_t p = (uint32_t)rgb888[i * 3 + 0] << 16
+                   | (uint32_t)rgb888[i * 3 + 1] << 8
+                   | (uint32_t)rgb888[i * 3 + 2];
+        buf[i] = (float)p;
     }
 }
 
@@ -163,7 +170,6 @@ static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
 
     const int iw = EI_CLASSIFIER_INPUT_WIDTH;
     const int ih = EI_CLASSIFIER_INPUT_HEIGHT;
-    const int ch = EI_CLASSIFIER_INPUT_CHANNELS;
 
     /* The caller feeds exactly the model's input geometry, but an odd sensor
      * aspect could slip a mismatched size through. Guard before touching the
@@ -173,43 +179,48 @@ static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
         return false;
     }
 
-    int16_t *buf = malloc((size_t)iw * ih * ch * sizeof(int16_t));
+    float *buf = (float *)malloc((size_t)iw * ih * sizeof(float));
     if (buf == NULL) return false;
 
     prv_fill_tensor(input_rgb888, w, h, buf);
 
     signal_t signal;
-    int err = numpy::signal_from_buffer(buf, iw * ih * ch, &signal);
+    int err = numpy::signal_from_buffer(buf, iw * ih, &signal);
     if (err != 0) {
         free(buf);
         return false;
     }
 
-    ei_impulse_result_t result = { 0 };
+ei_impulse_result_t result = { 0 };
     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
     free(buf);
 
     if (r != EI_IMPULSE_OK) {
         ESP_LOGW(TAG, "run_classifier returned %d", (int)r);
-        return false;
+    } else {
+        ESP_LOGI(TAG, "classify: dsp=%dms infer=%dms post=%dms boxes=%u",
+                 (int)result.timing.dsp, (int)result.timing.classification,
+                 (int)result.timing.postprocessing,
+                 (unsigned)result.bounding_boxes_count);
     }
 
     /* Prefer the highest-scoring FECES box. A co-present pig box must not
      * suppress the target class (the old code kept only the globally top box,
      * so a strong pig box could mask a weaker-but-real feces hit). Pig is kept
      * as the fallback so a pig-only frame still reports a non-target class id
-     * instead of -1. */
+     * instead of -1. Note: this SDK revision iters bounding boxes by LABEL
+     * (class name string) rather than a numeric id. */
     int32_t best_feces = -1, best_pig = -1;
-    for (size_t i = 0; i < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ++i) {
+    for (size_t i = 0; i < result.bounding_boxes_count; ++i) {
         const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[i];
         if (bb->value < EI_FOMO_PRESENT_THRESHOLD) {
             continue;
         }
-        if (bb->label_id == EI_CLASS_FECES) {
+        if (strcmp(bb->label, "feces") == 0) {
             if (best_feces < 0 || bb->value > result.bounding_boxes[best_feces].value) {
                 best_feces = (int32_t)i;
             }
-        } else if (bb->label_id == EI_CLASS_PIG) {
+        } else if (strcmp(bb->label, "pig") == 0) {
             if (best_pig < 0 || bb->value > result.bounding_boxes[best_pig].value) {
                 best_pig = (int32_t)i;
             }
@@ -222,13 +233,13 @@ static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
     if (pick >= 0) {
         const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[pick];
         out->score = bb->value;
-        out->class_id = bb->label_id;
-        /* Edge Impulse boxes are (x, y, w, h) of the bounding box in
-         * normalized 0..1 coords. fomo_result_t stores the centroid + size. */
-        out->x = bb->x + bb->width / 2.0f;
-        out->y = bb->y + bb->height / 2.0f;
-        out->width = bb->width;
-        out->height = bb->height;
+        out->class_id = (strcmp(bb->label, "feces") == 0) ? EI_CLASS_FECES : EI_CLASS_PIG;
+        /* This SDK reports boxes in pixel coords of the model input; convert
+         * to the normalized 0..1 centroid+size that fomo_result_t carries. */
+        out->x = (bb->x + bb->width / 2.0f) / (float)iw;
+        out->y = (bb->y + bb->height / 2.0f) / (float)ih;
+        out->width = (float)bb->width / (float)iw;
+        out->height = (float)bb->height / (float)ih;
     }
 
     out->object_present = out->class_id == EI_CLASS_FECES;
@@ -238,8 +249,8 @@ static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
 
 #endif /* EI_SDK_PRESENT */
 
-bool edge_impulse_run_model(const uint8_t *input_rgb888, int w, int h,
-                            fomo_result_t *out, uint32_t *elapsed_ms)
+extern "C" bool edge_impulse_run_model(const uint8_t *input_rgb888, int w, int h,
+                                       fomo_result_t *out, uint32_t *elapsed_ms)
 {
     if (input_rgb888 == NULL || out == NULL) return false;
     memset(out, 0, sizeof(*out));
