@@ -49,8 +49,11 @@ Verify: `curl http://localhost:8000/health` returns model info.
 ### Hardware
 
 - ESP32-S3 board with **OV3660** camera (Wi-Fi + BT, PSRAM)
-- Relay module wired to `APP_PIN_RELAY` (default GPIO 4) for water pump
-- Optional status LED on GPIO 2
+- Alarm buzzer on `APP_PIN_BUZZER` (GPIO 14) via a 220 ohm resistor
+- Optional external LED on GPIO 1 via a 330 ohm resistor; on-board status LED on GPIO 2
+- Optional relay module on `APP_PIN_RELAY` (GPIO 14) for a water pump
+
+See [wiring-guide.md](wiring-guide.md) for the full pin map and breadboard layout.
 
 ### Build & flash
 
