@@ -182,6 +182,74 @@ static esp_err_t prv_read_body(httpd_req_t *req, char *buf, size_t size)
     return total > 0 ? ESP_OK : ESP_FAIL;
 }
 
+/* Escape a value for use inside a single-quoted HTML attribute. Covers the
+ * five characters that can break out of value='...' or start markup. */
+static void prv_html_escape(const char *in, char *out, size_t out_size)
+{
+    static const struct { char c; const char *rep; } MAP[] = {
+        { '&',  "&amp;"  }, { '<',  "&lt;"   }, { '>',  "&gt;"   },
+        { '\'', "&#39;"  }, { '"',  "&quot;" },
+    };
+    size_t o = 0;
+    for (const char *r = in; *r && o + 1 < out_size; r++) {
+        const char *rep = NULL;
+        size_t rep_len = 1;
+        for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+            if (*r == MAP[i].c) { rep = MAP[i].rep; rep_len = strlen(MAP[i].rep); break; }
+        }
+        if (o + rep_len + 1 > out_size) break;   /* truncate rather than overflow */
+        if (rep) { memcpy(out + o, rep, rep_len); o += rep_len; }
+        else     { out[o++] = *r; }
+    }
+    out[o] = '\0';
+}
+
+static int prv_hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Percent-decode in place. httpd_query_key_value() copies the raw bytes
+ * between '=' and the next '&' without decoding, so a browser submitting an
+ * SSID containing '&' sends "A%26B" and the device would store the escape
+ * literally. Decoding here also turns '+' into a space, which is what form
+ * encoding means for a space. Returns the new length. */
+static size_t prv_url_decode(char *s)
+{
+    char *w = s;
+    for (char *r = s; *r; ) {
+        if (*r == '%' && prv_hexval(r[1]) >= 0 && prv_hexval(r[2]) >= 0) {
+            *w++ = (char)((prv_hexval(r[1]) << 4) | prv_hexval(r[2]));
+            r += 3;
+        } else if (*r == '+') {
+            *w++ = ' ';
+            r++;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+    return (size_t)(w - s);
+}
+
+/* Fetch a key from an urlencoded body and percent-decode it into out. */
+static bool prv_get_decoded(const char *body, const char *key,
+                            char *out, size_t out_size)
+{
+    char raw[270];
+    if (httpd_query_key_value(body, key, raw, sizeof(raw)) != ESP_OK) return false;
+    if (prv_url_decode(raw) >= out_size) {
+        ESP_LOGW(TAG, "%s too long after decoding, ignored", key);
+        return false;
+    }
+    strncpy(out, raw, out_size - 1);
+    out[out_size - 1] = '\0';
+    return true;
+}
+
 /* POST /config — persist runtime settings to NVS then reboot.
  * Body is URL-encoded key=value pairs (form or query string), e.g.
  *   wifi_ssid, wifi_pass, verify_url, dash_url, threshold,
@@ -202,24 +270,23 @@ static esp_err_t handler_config_post(httpd_req_t *req)
     app_config_load(&cfg);
 
     char val[270];
-    if (httpd_query_key_value(body, "wifi_ssid", val, sizeof(val)) == ESP_OK && val[0]) {
+    if (prv_get_decoded(body, "wifi_ssid", val, sizeof(val)) && val[0]) {
         strncpy(cfg.wifi_ssid, val, sizeof(cfg.wifi_ssid) - 1);
         cfg.wifi_ssid[sizeof(cfg.wifi_ssid) - 1] = '\0';
     }
-    if (httpd_query_key_value(body, "wifi_pass", val, sizeof(val)) == ESP_OK) {
+    if (prv_get_decoded(body, "wifi_pass", val, sizeof(val))) {
         strncpy(cfg.wifi_pass, val, sizeof(cfg.wifi_pass) - 1);
         cfg.wifi_pass[sizeof(cfg.wifi_pass) - 1] = '\0';
     }
-    if (httpd_query_key_value(body, "verify_url", val, sizeof(val)) == ESP_OK && val[0]) {
+    if (prv_get_decoded(body, "verify_url", val, sizeof(val)) && val[0]) {
         strncpy(cfg.verify_url, val, sizeof(cfg.verify_url) - 1);
         cfg.verify_url[sizeof(cfg.verify_url) - 1] = '\0';
     }
-    if (httpd_query_key_value(body, "dash_url", val, sizeof(val)) == ESP_OK && val[0]) {
+    if (prv_get_decoded(body, "dash_url", val, sizeof(val)) && val[0]) {
         strncpy(cfg.dash_url, val, sizeof(cfg.dash_url) - 1);
         cfg.dash_url[sizeof(cfg.dash_url) - 1] = '\0';
     }
-    if (httpd_query_key_value(body, "dash_verify_url", val, sizeof(val)) == ESP_OK
-            && val[0]) {
+    if (prv_get_decoded(body, "dash_verify_url", val, sizeof(val)) && val[0]) {
         strncpy(cfg.dash_verify_url, val, sizeof(cfg.dash_verify_url) - 1);
         cfg.dash_verify_url[sizeof(cfg.dash_verify_url) - 1] = '\0';
     }
@@ -257,6 +324,17 @@ static esp_err_t handler_setup(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
         return ESP_OK;
     }
+    /* Values go into single-quoted HTML attributes, so escape them first. An
+     * SSID containing & or < would otherwise truncate the attribute or inject
+     * markup. IDF 5.5.5 has no HTML escape helper, so this covers the five
+     * characters that matter inside an attribute value. */
+    char esc_ssid[130], esc_pass[200], esc_verify[300], esc_dash[300], esc_dash_v[300];
+    prv_html_escape(cfg.wifi_ssid, esc_ssid, sizeof(esc_ssid));
+    prv_html_escape(cfg.wifi_pass, esc_pass, sizeof(esc_pass));
+    prv_html_escape(cfg.verify_url, esc_verify, sizeof(esc_verify));
+    prv_html_escape(cfg.dash_url, esc_dash, sizeof(esc_dash));
+    prv_html_escape(cfg.dash_verify_url, esc_dash_v, sizeof(esc_dash_v));
+
     int n = snprintf(page, 3072,
         "<!doctype html><html><head><title>Feces Detector setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -285,7 +363,7 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "value='%u'>"
         "<button type='submit'>Save &amp; restart</button></form>"
         "</body></html>",
-        cfg.wifi_ssid, cfg.wifi_pass, cfg.verify_url, cfg.dash_url, cfg.dash_verify_url,
+        esc_ssid, esc_pass, esc_verify, esc_dash, esc_dash_v,
         (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms);
 
     httpd_resp_set_type(req, "text/html");
