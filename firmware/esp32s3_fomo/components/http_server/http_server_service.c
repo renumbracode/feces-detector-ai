@@ -276,7 +276,7 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "<label>Dashboard API URL</label><input name='dash_url' value='%s' maxlength='256'>"
         "<label>Dashboard verify URL (yolo_conf report)</label><input name='dash_verify_url' "
         "value='%s' maxlength='256'>"
-        "<label>Detection threshold (0..1)</label><input type='number' step='0.05' "
+        "<label>Detection threshold (0..1) — spray dial</label><input type='number' step='0.01' "
         "name='threshold' value='%.2f' min='0' max='1'>"
         "<label>Cooldown ms</label><input type='number' step='1000' name='cooldown_ms' "
         "value='%u'>"

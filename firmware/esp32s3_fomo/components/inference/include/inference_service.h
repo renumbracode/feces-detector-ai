@@ -38,6 +38,10 @@ void inference_service_latest(fomo_result_t *out);
 int edge_impulse_input_width(void);
 int edge_impulse_input_height(void);
 
+/* Fixed FOMO box-presentation floor. The runtime recall<->precision knob is
+ * the separate spray dial ("threshold") in the web config / NVS. */
+float edge_impulse_present_threshold(void);
+
 /* Identifier string reported in /status + dashboard rows, telling what is
  * actually running on-device: fomo:stub / fomo:1class / fomo:2class. */
 const char *edge_impulse_model_tag(void);

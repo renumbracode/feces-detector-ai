@@ -31,7 +31,6 @@ static const char *TAG = "inference";
 
 static SemaphoreHandle_t s_lock = NULL;
 static fomo_result_t s_latest;
-static float s_fomo_confidence = 0.8f;
 
 /* From edge_impulse_invoke.c */
 extern bool edge_impulse_run_model(const uint8_t *input_rgb888, int w, int h,
@@ -166,6 +165,7 @@ esp_err_t inference_service_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     memset(&s_latest, 0, sizeof(s_latest));
-    ESP_LOGI(TAG, "Inference service ready (FOMO, conf>=%.2f triggers)", s_fomo_confidence);
+    ESP_LOGI(TAG, "Inference service ready (FOMO, box floor>=%.2f; spray dial is the runtime trigger)",
+             edge_impulse_present_threshold());
     return ESP_OK;
 }

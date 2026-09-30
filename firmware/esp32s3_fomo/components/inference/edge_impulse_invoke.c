@@ -32,10 +32,13 @@
 #define EI_INPUT_W_FALLBACK 160
 #define EI_INPUT_H_FALLBACK 160
 
-/* Minimum FOMO cell score for a box to be reported as a detection. FOMO
- * scores are per-cell and typically want ~0.4-0.6, not 0.8 like an
- * object-detection score. */
-#define EI_FOMO_PRESENT_THRESHOLD 0.45f
+/* Minimum FOMO cell score for a box to be reported as a detection. This is a
+ * fixed noise floor only, NOT the recall<->precision knob: anything that
+ * clears 0.30 becomes a candidate, and the runtime spray dial (web /config
+ * -> threshold, NVS-backed) makes the final spray decision. Keeping the floor
+ * below the dial range is deliberate -- a floor above the dial would silently
+ * drop detections the dial could otherwise accept. */
+#define EI_FOMO_PRESENT_THRESHOLD 0.30f
 
 #if defined(__has_include)
 #  if __has_include("edge_impulse_capsrd.h")
@@ -71,6 +74,13 @@ int edge_impulse_input_height(void)
 #else
     return EI_INPUT_H_FALLBACK;
 #endif
+}
+
+/* Fixed box-presentation floor (see EI_FOMO_PRESENT_THRESHOLD). Exposed so
+ * the inference service can log the real gate instead of a stale constant. */
+float edge_impulse_present_threshold(void)
+{
+    return (float)EI_FOMO_PRESENT_THRESHOLD;
 }
 
 /* Honest model id for /status + dashboard logging so the panel is never
@@ -184,14 +194,33 @@ static bool prv_run_classifier(const uint8_t *input_rgb888, int w, int h,
         return false;
     }
 
-    /* Find the highest-scoring box and pick the class that goes with it. */
-    out->score = 0.0f;
-    out->class_id = -1;
+    /* Prefer the highest-scoring FECES box. A co-present pig box must not
+     * suppress the target class (the old code kept only the globally top box,
+     * so a strong pig box could mask a weaker-but-real feces hit). Pig is kept
+     * as the fallback so a pig-only frame still reports a non-target class id
+     * instead of -1. */
+    int32_t best_feces = -1, best_pig = -1;
     for (size_t i = 0; i < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ++i) {
         const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[i];
-        if (bb->value < EI_FOMO_PRESENT_THRESHOLD || bb->value <= out->score) {
+        if (bb->value < EI_FOMO_PRESENT_THRESHOLD) {
             continue;
         }
+        if (bb->label_id == EI_CLASS_FECES) {
+            if (best_feces < 0 || bb->value > result.bounding_boxes[best_feces].value) {
+                best_feces = (int32_t)i;
+            }
+        } else if (bb->label_id == EI_CLASS_PIG) {
+            if (best_pig < 0 || bb->value > result.bounding_boxes[best_pig].value) {
+                best_pig = (int32_t)i;
+            }
+        }
+    }
+
+    out->score = 0.0f;
+    out->class_id = -1;
+    int32_t pick = (best_feces >= 0) ? best_feces : best_pig;
+    if (pick >= 0) {
+        const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[pick];
         out->score = bb->value;
         out->class_id = bb->label_id;
         /* Edge Impulse boxes are (x, y, w, h) of the bounding box in

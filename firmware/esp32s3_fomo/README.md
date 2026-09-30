@@ -75,9 +75,38 @@ Writable on first boot via `components/app_config` (NVS). Defaults:
 | `wifi_pass` | _(live network; change via `/setup`)_ |
 | `verify_url` | `http://192.168.1.3:8000/verify` (Python YOLOv8 server) |
 | `dash_url` | `http://192.168.1.3/feces-detector-ai/dashboard/.../insert_detection.php` |
-| `threshold` | `0.60` (min FOMO score to auto-spray) |
+| `threshold` | `0.60` (min FOMO score to auto-spray — the field dial, see below) |
 | `cooldown_ms` | `300000` (5 min between auto sprays) |
 | `spray_ms` | `5000` (pump-on duration) |
+
+## Detection thresholds: floor vs dial
+
+There are **two** thresholds, and they are intentionally different scales:
+
+| | Value | Where | Role |
+|---|---|---|---|
+| Box floor | `0.30` | `edge_impulse_invoke.c` (`EI_FOMO_PRESENT_THRESHOLD`) | Fixed noise gate. Boxes below it never become candidates. Not runtime-tunable: a floor above the dial would silently eat detections the dial could accept. |
+| Spray dial | `0.60` | web `/config` → NVS `threshold` | The one runtime knob. Recall ↔ precision slider. Lower it to catch more manure (accepting more false sprays), raise it to stop over-spraying. |
+
+Spray logic (class-correct by design): only the **feces** class can trigger —
+`detection_service.c` checks `class_id == EI_CLASS_FECES` before calling the
+spray controller. A pig-only frame can never fire the relay. In a mixed frame
+(pig + manure) the highest-scoring **feces** box wins, so a confident pig box
+cannot suppress a real manure hit.
+
+**Field tuning procedure** (Phase C):
+
+1. Flash, serve `/setup`, confirm the live `/stream` overlay.
+2. Set the dial (`threshold`) to ~`0.40` and watch the dashboard `confidence`
+   column + over-spray.
+3. Move down −0.01/0.05 at a time: it over-sprays → raise; it misses pellet →
+   lower. Each step trades precision for recall in the direction you moved.
+4. Record the final value. A future negative/background-class retrain
+   (`training/`) buys back the precision you traded away at the dial.
+5. Expected zone: `0.30`–`0.50`. The model itself had recall ~0.5 @ precision
+   ~0.7 on the EI test set at dial `0.60`; lower recall is the danger for
+   spraying (a miss = manure left behind), so err toward lower rather than
+   higher.
 
 ## HTTP endpoints (dashboard-compatible)
 
