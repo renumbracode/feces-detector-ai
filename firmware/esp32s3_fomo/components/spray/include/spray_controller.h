@@ -12,8 +12,10 @@ typedef struct {
     uint64_t cooldown_until_ms; /* absolute time (esp_timer us /1000) when cooldown ends */
 } spray_status_t;
 
-/* Init GPIO, apply config. Base is main-facing. */
-void spray_controller_init(int relay_pin, int led_pin, float threshold,
+/* Init GPIO + buzzer, apply config. Base is main-facing.
+ * buzzer_pin is driven at ~2kHz via LEDC and may equal relay_pin. */
+void spray_controller_init(int relay_pin, int led_pin, int buzzer_pin,
+                           float threshold,
                            uint32_t cooldown_ms, uint32_t spray_ms);
 
 /* Attempt an auto spray based on a detection confidence. Returns true if triggered. */

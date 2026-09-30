@@ -15,8 +15,12 @@
 #define APP_DEFAULT_DASH_URL "http://192.168.1.3/feces-detector-ai/dashboard/api/insert"
 #define APP_DEFAULT_DASH_VERIFY_URL "http://192.168.1.3/feces-detector-ai/dashboard/api/verify"
 
-#define APP_PIN_RELAY 4        /* GPIO driving the relay / water pump */
+/* GPIO4 is the camera's SCCB data line (CAM_PIN_SIOD in camera_service.c) and
+ * camera init runs after spray init, so it reclaims the pin as an open-drain
+ * input. Driving it as a relay silently does nothing. Use 14 instead. */
+#define APP_PIN_RELAY 14       /* GPIO driving the relay / water pump */
 #define APP_PIN_LED 2          /* on-board status LED (flash LED on some boards) */
+#define APP_PIN_BUZZER 14      /* alarm buzzer; shared with the relay by design */
 
 #define APP_DEFAULT_THRESHOLD 0.60f
 #define APP_DEFAULT_COOLDOWN_MS 300000u

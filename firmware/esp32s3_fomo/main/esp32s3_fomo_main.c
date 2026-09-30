@@ -47,8 +47,8 @@ void app_main(void)
 
     wifi_service_start();
 
-    spray_controller_init(APP_PIN_RELAY, APP_PIN_LED, cfg.threshold,
-                          cfg.cooldown_ms, cfg.spray_ms);
+    spray_controller_init(APP_PIN_RELAY, APP_PIN_LED, APP_PIN_BUZZER,
+                          cfg.threshold, cfg.cooldown_ms, cfg.spray_ms);
 
     e = camera_service_init();
     if (e != ESP_OK) {
