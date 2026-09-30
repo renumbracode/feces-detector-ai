@@ -9,8 +9,13 @@
 #define APP_DASH_URL_KEY "dash_url"
 #define APP_DASH_VERIFY_URL_KEY "dash_verify_url"
 
-#define APP_DEFAULT_WIFI_SSID "REDACTED_SSID"
-#define APP_DEFAULT_WIFI_PASS "REDACTED_PASS"
+/* Wi-Fi credentials are supplied per device and must not live in source. app_config
+ * reads them from NVS (namespace "fomo_app", keys "wifi_ssid" / "wifi_pass") and
+ * falls back to these only when NVS has no entry. Set them once with:
+ *   curl -X POST http://<device-ip>/config -d 'wifi_ssid=...&wifi_pass=...'
+ * which writes NVS and reboots. Keep them empty here. */
+#define APP_DEFAULT_WIFI_SSID ""
+#define APP_DEFAULT_WIFI_PASS ""
 #define APP_DEFAULT_VERIFY_URL "http://192.168.1.3:8000/verify"
 #define APP_DEFAULT_DASH_URL "http://192.168.1.3/feces-detector-ai/dashboard/api/insert"
 #define APP_DEFAULT_DASH_VERIFY_URL "http://192.168.1.3/feces-detector-ai/dashboard/api/verify"

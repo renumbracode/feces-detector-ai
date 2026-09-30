@@ -71,8 +71,8 @@ Writable on first boot via `components/app_config` (NVS). Defaults:
 
 | Key | Default |
 |---|---|
-| `wifi_ssid` | `REDACTED_SSID` |
-| `wifi_pass` | _(live network; change via `/setup`)_ |
+| `wifi_ssid` | _(empty; set per device via `POST /config` or `/setup`)_ |
+| `wifi_pass` | _(empty; set per device)_ |
 | `verify_url` | `http://192.168.1.3:8000/verify` (Python YOLOv8 server) |
 | `dash_url` | `http://192.168.1.3/feces-detector-ai/dashboard/.../insert_detection.php` |
 | `threshold` | `0.60` (min FOMO score to auto-spray — the field dial, see below) |
