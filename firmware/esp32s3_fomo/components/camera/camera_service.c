@@ -59,7 +59,7 @@ esp_err_t camera_service_init(void)
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = CAM_FRAMESIZE,
         .jpeg_quality = 12,
-        .fb_count = 4,              /* enough for MJPEG stream + detect task consumers */
+        .fb_count = 6,              /* stream + detect consumers; 4 starved the MJPEG task */
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
     };

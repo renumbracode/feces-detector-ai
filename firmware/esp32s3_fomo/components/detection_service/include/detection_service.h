@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 /* Continuous detection loop: captures frames on a runner, runs FOMO
@@ -20,3 +21,9 @@ typedef struct {
 } verify_result_t;
 
 void detection_service_verify_result(verify_result_t *out);
+
+/* Number of feces detections this boot has acted on: frames the device
+ * classified as feces and published to the dashboard (throttled to every 5th
+ * frame). Counts device-side detections, so it keeps climbing even when the
+ * dashboard is unreachable. Surfaced as "detections" in /status. */
+uint32_t detection_service_detection_count(void);

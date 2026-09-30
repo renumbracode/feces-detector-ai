@@ -106,7 +106,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"vrf\":{\"valid\":%s,\"detected\":%s,\"conf\":%.4f,\"ageMs\":%u,"
         "\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
         "\"lastSprayAgoMs\":%llu,\"uptimeS\":%llu,"
-        "\"inferenceMs\":%u,\"detections\":0}",
+        "\"inferenceMs\":%u,\"detections\":%u}",
         wifi_ip_str(), (unsigned)free_sram,
         edge_impulse_model_tag(),
         sp.spraying ? "true" : "false",
@@ -123,7 +123,8 @@ static esp_err_t handler_status(httpd_req_t *req)
         (double)vr.x, (double)vr.y, (double)vr.w, (double)vr.h,
         (unsigned long long)sp.last_spray_ago_ms,
         (unsigned long long)(esp_timer_get_time() / 1000000u),
-        (unsigned)last.inference_ms);
+        (unsigned)last.inference_ms,
+        (unsigned)detection_service_detection_count());
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);

@@ -40,10 +40,26 @@ static verify_result_t s_verify = { 0 };
 static int64_t s_verify_ms = 0;
 static SemaphoreHandle_t s_verify_mux = NULL;
 
+/* Verifier reachability, written only by the detect task. s_verify_ok is false
+ * once a poll fails, and s_verify_retry_ms gates the next attempt. */
+static bool s_verify_ok = true;
+static int64_t s_verify_retry_ms = 0;
+
+/* Feces detections acted on this boot (see detection_service_detection_count).
+ * Bumped by the detection task only; read by the /status handler. A uint32_t
+ * counter and a single writer make the torn-read window irrelevant in practice,
+ * and the value is diagnostic, not control-critical. */
+static volatile uint32_t s_detection_count = 0;
+
 /* How often the live frame is re-checked by the server-side YOLOv8 model.
  * Independent of the on-device model so the dashboard overlay keeps working
  * while FOMO is still the pre-export stub. */
 #define VERIFY_POLL_MS 2000
+
+/* After a failed poll the verifier is presumed down and skipped for this long.
+ * The poll runs inline in the detect loop, so retrying every 2 s against a
+ * closed port would spend most of the loop waiting on TCP timeouts. */
+#define VERIFY_BACKOFF_MS 30000
 
 /* Find "\"key\":" then parse the following number. Used on trusted LAN JSON. */
 static long prv_parse_int_key(const char *json, const char *key)
@@ -251,7 +267,10 @@ static void prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     esp_http_client_handle_t c;
     char body[1280] = "";
     body_sink_t sink;
-    c = prv_client_init(&sink, body, sizeof(body), cfg->verify_url, 8000);
+    /* 1.5 s, not 8 s: this runs inline in the detect loop, so a dead verifier
+     * cost a full 8 s timeout every other cycle. A slow answer is worthless
+     * here anyway - the overlay is refreshed 2 s from now regardless. */
+    c = prv_client_init(&sink, body, sizeof(body), cfg->verify_url, 1500);
     if (!c) return;
 
     char fomo_hdr[16];
@@ -265,6 +284,10 @@ static void prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     esp_err_t e = esp_http_client_perform(c);
     if (e != ESP_OK) {
         ESP_LOGD(TAG, "verify poll failed: %s", esp_err_to_name(e));
+        /* Back off so an offline verifier costs one 1.5 s timeout per
+         * VERIFY_BACKOFF_MS instead of stalling every 2 s cycle. */
+        s_verify_ok = false;
+        s_verify_retry_ms = esp_timer_get_time() / 1000 + VERIFY_BACKOFF_MS;
     } else {
         /* esp_http_client_perform() returns ESP_OK for 4xx/5xx too, so without
          * this check a rejected frame (the server answers 400 for an empty or
@@ -273,7 +296,10 @@ static void prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
         int status = esp_http_client_get_status_code(c);
         if (status < 200 || status >= 300) {
             ESP_LOGD(TAG, "verify poll rejected: HTTP %d", status);
+            s_verify_ok = false;
+            s_verify_retry_ms = esp_timer_get_time() / 1000 + VERIFY_BACKOFF_MS;
         } else if (sink.len > 0) {
+            s_verify_ok = true;
             verify_result_t v = { 0 };
             v.valid = true;
             v.detected = prv_parse_bool_key(body, "detected");
@@ -308,6 +334,11 @@ void detection_service_verify_result(verify_result_t *out)
     out->age_ms = out->valid ? (uint32_t)(esp_timer_get_time() / 1000 - stamp) : 0;
 }
 
+uint32_t detection_service_detection_count(void)
+{
+    return s_detection_count;
+}
+
 static void detection_task(void *arg)
 {
     (void)arg;
@@ -326,7 +357,22 @@ static void detection_task(void *arg)
             continue;
         }
 
-        fomo_result_t res = inference_service_classify(fb->buf, fb->len);
+        /* Copy the JPEG and hand the camera buffer back BEFORE inferring.
+         * classify() spends ~1.1 s in ESP-NN; holding a frame across that
+         * window took a buffer out of circulation and starved the MJPEG
+         * stream (2.85 fps of a 25 fps target). Same reasoning as the
+         * report/verify copy below, just hoisted ahead of the model. */
+        uint8_t *frame_copy = malloc(fb->len);
+        if (frame_copy == NULL) {
+            camera_service_release_frame(fb);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        memcpy(frame_copy, fb->buf, fb->len);
+        size_t frame_len = fb->len;
+        camera_service_release_frame(fb);
+
+        fomo_result_t res = inference_service_classify(frame_copy, frame_len);
 
         /* Only the feces class may spray or publish. A pig-only frame must
          * neither trigger the relay nor be logged as a detection. */
@@ -348,34 +394,33 @@ static void detection_task(void *arg)
         /* Report/publish detections (feces class only), throttled to every Nth
          * frame so ~10 fps inference becomes ~2 Hz of network traffic. */
         bool do_report = is_feces && (frame_counter % 5 == 0);
-        bool do_verify = (now_ms - last_verify_ms) >= VERIFY_POLL_MS;
+        bool do_verify = (now_ms - last_verify_ms) >= VERIFY_POLL_MS &&
+                         (s_verify_ok || now_ms >= s_verify_retry_ms);
 
+        /* Count the device-side decision, not the HTTP outcome: a detection
+         * still counts if the dashboard is down. Reported after the spray
+         * decision above, so a counted detection has already been acted on. */
+        if (do_report) {
+            s_detection_count++;
+        }
+
+        /* The camera buffer is already back with the driver (see the copy
+         * above), and frame_copy is a private heap JPEG, so network I/O here
+         * cannot starve the stream. Reuse it rather than copying twice. */
         if (do_report || do_verify) {
-            /* Copy the JPEG so we can release the camera buffer BEFORE doing
-             * network I/O; holding the frame during an HTTP POST (up to 15 s
-             * on a timeout) would starve the MJPEG stream of buffers. */
-            uint8_t *shot = malloc(fb->len);
-            if (shot) {
-                memcpy(shot, fb->buf, fb->len);
-                size_t shot_len = fb->len;
-                camera_service_release_frame(fb);
-                fb = NULL;
-
-                if (do_verify) {
-                    prv_poll_verify(&cfg, shot, shot_len, res.score);
-                    last_verify_ms = esp_timer_get_time() / 1000;
+            if (do_verify) {
+                prv_poll_verify(&cfg, frame_copy, frame_len, res.score);
+                last_verify_ms = esp_timer_get_time() / 1000;
+            }
+            if (do_report) {
+                long id = prv_post_dashboard(&cfg, res.score, triggered, cfg.spray_ms);
+                float yolo_conf = prv_post_verify(&cfg, frame_copy, frame_len, res.score);
+                if (id > 0 && yolo_conf >= 0.0f) {
+                    prv_post_verify_result(&cfg, id, yolo_conf);
                 }
-                if (do_report) {
-                    long id = prv_post_dashboard(&cfg, res.score, triggered, cfg.spray_ms);
-                    float yolo_conf = prv_post_verify(&cfg, shot, shot_len, res.score);
-                    if (id > 0 && yolo_conf >= 0.0f) {
-                        prv_post_verify_result(&cfg, id, yolo_conf);
-                    }
-                }
-                free(shot);
             }
         }
-        if (fb) camera_service_release_frame(fb);
+        free(frame_copy);
         frame_counter++;
         vTaskDelay(pdMS_TO_TICKS(100)); /* ~10 fps detection cadence */
     }
