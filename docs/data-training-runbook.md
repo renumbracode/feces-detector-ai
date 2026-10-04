@@ -199,5 +199,20 @@ box counts and fails if a class id is out of range.
 | False positives (spray on mud) | Raise `threshold` on device / add background images |
 | Verify badge never appears | Python server not running or wrong `verify_url` |
 
-Set the device threshold/cooldown/spray in `firmware/.../components/app_config`
-(defaults: 0.60 / 300000 ms / 5000 ms).
+Set these at runtime over `POST /config` (no reflash, survives reboot, also on the
+`/setup` page):
+
+```
+curl -X POST http://192.168.1.39/config -d 'threshold=0.20&cooldown_ms=30000&spray_ms=5000'
+```
+
+`threshold` gates the on-device FOMO score; `server_trigger_conf` (default 0.28) gates
+the server-side YOLOv8 score. They are separate because the two models are not
+calibrated against each other. Firmware defaults live in
+`firmware/.../components/app_config/include/app_config.h`.
+
+For calibration only, the model's own generated FOMO floor is lowered in
+`model_variables.h` (`.threshold`), and `EI_FOMO_PRESENT_THRESHOLD` in
+`edge_impulse_invoke.cpp` is a second floor. Both sit far below the spray dial so the
+real score is observable; restore them once the threshold is calibrated, because
+scores read near that floor understate the model's true confidence.

@@ -12,19 +12,16 @@
 #include "inference_service.h"
 
 /* ---------- Edge Impulse integration point ------------------------------
- * This file isolates the model invocation so that whichever runtime you
- * choose (TFLite Micro / Edge Impulse SDK) touches only
- * edge_impulse_invoke.c. To activate a trained model:
+ * This file isolates the model invocation so that the runtime (TFLite Micro
+ * / Edge Impulse SDK) touches only edge_impulse_invoke.cpp.
  *
- *   1. In Edge Impulse: Deploy -> Arduino/ESP-IDF library export.
- *   2. Unzip into components/inference/edge_impulse/ so that the
- *      exported sources (model_parameters.h, tflite-model source, etc.)
- *      are available to edge_impulse_invoke.c.
- *   3. Fill in the input/detail sizes in edge_impulse_invoke.c to match
- *      your exported model (EI_CLASSIFIER_INPUT_WIDTH/HEIGHT/etc.).
- *
- * Until a real model is placed there, a deterministic stub classifier is
- * compiled in so the firmware builds, boots, and serves /stream + /status.
+ * The trained 2-class FOMO export is now present under edge_impulse/
+ * (160x160 input, labels "feces" and "pig"), so EI_SDK_PRESENT is 1 and
+ * edge_impulse_invoke.cpp compiles the real run_classifier() path. A
+ * deterministic brightness stub is still compiled in as the fallback so the
+ * firmware builds and boots without the export present; /status reports which
+ * one is live via edge_impulse_model_tag() -- "fomo:2class" for the real model,
+ * "fomo:stub" if the export ever goes missing.
  * ---------------------------------------------------------------------- */
 
 static const char *TAG = "inference";

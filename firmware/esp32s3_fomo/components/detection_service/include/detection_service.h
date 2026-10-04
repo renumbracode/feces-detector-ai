@@ -27,3 +27,15 @@ void detection_service_verify_result(verify_result_t *out);
  * frame). Counts device-side detections, so it keeps climbing even when the
  * dashboard is unreachable. Surfaced as "detections" in /status. */
 uint32_t detection_service_detection_count(void);
+
+/* ---------- verifier (server-side YOLOv8) health ----------
+ * Exposed because the live page's "VERIFY OFFLINE" used to be indistinguishable
+ * between "the server is down" and "the board stopped trying", which sends the
+ * diagnosis after the wrong component entirely. A poll leg that stalls silently
+ * is otherwise invisible: /status keeps reporting the last accepted answer and
+ * its age climbs, but nothing says whether attempts are still being made. */
+bool detection_service_verify_ok(void);
+/* Milliseconds since a verifier answer was last accepted. UINT64_MAX if never. */
+uint64_t detection_service_last_verify_ok_age_ms(void);
+/* Consecutive failed verify polls since the last accepted answer. */
+uint32_t detection_service_verify_failures(void);

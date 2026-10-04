@@ -5,7 +5,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
   <div class="panel-head">
     <h3 class="panel-title">Device alert</h3>
     <span class="muted" style="margin-left:auto">alarms on detection, even with the live view closed</span>
-    <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Toggle detection sounds">🔊 Sound on</button>
+    <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Disable detection sounds">🔊 Sound on</button>
   </div>
   <div class="panel-body">
     <div class="row">

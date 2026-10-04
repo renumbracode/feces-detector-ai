@@ -24,6 +24,8 @@ from pathlib import Path
 from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from PIL import Image
 import numpy as np
@@ -79,6 +81,35 @@ def get_model() -> YOLO:
     return _model
 
 
+def _run_yolo(arr):
+    """CPU-bound; call through run_in_threadpool.
+
+    predict() on a CPU-only torch build takes seconds. Running it directly in
+    the async handler blocked uvicorn's event loop, so while frame N was being
+    predicted the board's frame N+1 upload sat unread in the socket -- the
+    device gave up at its own timeout and we logged ClientDisconnect. Off the
+    loop, uploads are accepted while inference runs.
+    """
+    return get_model().predict(arr, conf=CONF_THRESHOLD, verbose=False)
+
+
+@app.on_event("startup")
+def warm_model() -> None:
+    """Load the weights before the first /verify arrives.
+
+    Lazy-loading inside the handler made the very first request pay the full
+    model load, which the device's HTTP timeout could not absorb -- that first
+    poll failed and the overlay sat on the 30 s backoff. Loading at startup
+    also makes /health report model_loaded: true so the state is observable.
+    """
+    try:
+        get_model()
+    except Exception as exc:  # noqa: BLE001
+        # Never block startup: /health should still come up and report the
+        # failure rather than the whole server refusing to boot.
+        print(f"model warm-up failed: {exc}")
+
+
 @app.get("/health")
 def health():
     ok = Path(MODEL_PATH).exists() if not _model else True
@@ -95,7 +126,13 @@ def health():
 
 @app.post("/verify")
 async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
-    img_bytes = await request.body()
+    try:
+        img_bytes = await request.body()
+    except ClientDisconnect:
+        # The device abandoned the upload (its own timeout, or a dropped
+        # socket). Answering 400 keeps this out of the server error log; there
+        # is no request left to infer against.
+        return JSONResponse({"ok": False, "error": "client disconnected"}, status_code=400)
     if not img_bytes:
         return JSONResponse({"ok": False, "error": "empty body"}, status_code=400)
 
@@ -115,11 +152,7 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
     # Boxes below are in the *resized* frame, so width/height must describe it.
 
     arr = np.asarray(pil)
-    results = get_model().predict(
-        arr,
-        conf=CONF_THRESHOLD,
-        verbose=False,
-    )
+    results = await run_in_threadpool(_run_yolo, arr)
 
     boxes = []
     best_per_class: dict[str, float] = {}

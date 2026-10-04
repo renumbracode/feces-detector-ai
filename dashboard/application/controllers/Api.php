@@ -36,7 +36,13 @@ class Api extends MY_Controller
         $sprayMs    = isset($_GET['spray_ms']) ? max(0, (int) $_GET['spray_ms']) : 0;
         $source     = isset($_GET['esp']) ? substr(preg_replace('/[^0-9a-zA-Z.:_\-]/', '', (string) $_GET['esp']), 0, 45) : 'esp32s3';
         $model      = isset($_GET['model']) ? substr(preg_replace('/[^0-9a-zA-Z0-9._\-]/', '', (string) $_GET['model']), 0, 20) : 'fomo:v1';
-        $notes      = isset($_GET['notes']) ? trim(substr(strip_tags((string) $_GET['notes']), 0, 255)) : null;
+        // The device sends notes as a URL query value, where a raw space would
+        // invalidate the URL, so it uses underscores and we restore them here.
+        // PHP has already turned any '+' into a space by this point, which is
+        // why the device must not rely on '+' for its own words.
+        $notes = isset($_GET['notes'])
+            ? trim(substr(strip_tags(str_replace('_', ' ', (string) $_GET['notes'])), 0, 255))
+            : null;
 
         if ($confidence < 0 || $confidence > 1) {
             $this->output->set_status_header(400);

@@ -74,7 +74,8 @@ Writable on first boot via `components/app_config` (NVS). Defaults:
 | `wifi_ssid` | _(empty; set per device via `POST /config` or `/setup`)_ |
 | `wifi_pass` | _(empty; set per device)_ |
 | `verify_url` | `http://192.168.1.3:8000/verify` (Python YOLOv8 server) |
-| `dash_url` | `http://192.168.1.3/feces-detector-ai/dashboard/.../insert_detection.php` |
+| `dash_url` | `http://192.168.1.3/feces-detector-ai/dashboard/api/insert` |
+| `dash_verify_url` | `http://192.168.1.3/feces-detector-ai/dashboard/api/verify` (reports the YOLOv8 confidence back to the detection row) |
 | `threshold` | `0.60` (min FOMO score to auto-spray — the field dial, see below) |
 | `cooldown_ms` | `300000` (5 min between auto sprays) |
 | `spray_ms` | `5000` (pump-on duration) |
@@ -123,5 +124,9 @@ cannot suppress a real manure hit.
 
 Camera GPIO pins are defined in `components/camera/camera_service.c` and are
 typical for ESP32-S3 CAM dev boards. Verify them against your board's
-schematic, and confirm the relay/`APP_PIN_RELAY` (default GPIO 4) and LED
+schematic, and confirm the relay/`APP_PIN_RELAY` (default GPIO 14) and LED
 (GPIO 2) pins.
+
+GPIO 4 is **not** usable for the relay — it is the camera's SCCB data line
+(`CAM_PIN_SIOD`). Camera init runs after spray init and reclaims the pin as an
+open-drain input, so a relay on GPIO 4 silently does nothing.

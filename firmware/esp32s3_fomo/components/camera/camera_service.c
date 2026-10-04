@@ -29,7 +29,30 @@ static const char *TAG = "camera_svc";
 #define CAM_PIN_PCLK    13
 
 #define CAM_XCLK_FREQ_HZ 20000000
-#define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720: light MJPEG, enough for AI input */
+/* 1280x720, and this must stay compatible with the 1/8 JPEG decode scale in
+ * inference_service.c (prv_decode_jpeg). Those two are coupled:
+ *
+ *   1280x720 --esp_jpeg 1/8--> 160x90 --resize--> 160x160 tensor  (~1:1)
+ *    640x480 --esp_jpeg 1/8-->  80x60 --resize--> 160x160 tensor  (2x UPSCALE)
+ *
+ * At 640x480 the decoder produced 80x60, so the 160x160 FOMO input was a 2x
+ * nearest-neighbour upscale of a heavily downscaled frame. Source pixels fell
+ * from 14400 to 4800 -- exactly 3x (2x horizontal, 1.5x vertical) -- and
+ * detection degraded until real feces scored too low to act on. Do not drop
+ * the frame size without changing the decode scale (or the model's input size)
+ * in the same commit -- the two numbers have to multiply out to roughly the
+ * model's input width. */
+#define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720 */
+
+/* jpeg_quality 0-63, and LOWER means higher quality on OV-series sensors, so
+ * this is deliberately low. The cost is bytes on the wire: MJPEG rides TCP, so
+ * a bigger frame means more time per frame on a lossy link. That tradeoff is
+ * real but it is the wrong thing to trade away -- starving the model of
+ * resolution costs detection accuracy outright, whereas a slower live view
+ * still shows the same thing. Prefer fixing latency by pacing the stream (see
+ * the adaptive interval in http_server_service.c) over by resampling the
+ * sensor. */
+#define CAM_JPEG_QUALITY 12
 
 static volatile bool s_streaming = false;
 static volatile int s_streaming_refs = 0;
@@ -58,7 +81,7 @@ esp_err_t camera_service_init(void)
         .ledc_channel = LEDC_CHANNEL_0,
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = CAM_FRAMESIZE,
-        .jpeg_quality = 12,
+        .jpeg_quality = CAM_JPEG_QUALITY,
         .fb_count = 6,              /* stream + detect consumers; 4 starved the MJPEG task */
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
@@ -80,7 +103,7 @@ esp_err_t camera_service_init(void)
     s->set_brightness(s, 0);
     s->set_contrast(s, 0);
     s->set_saturation(s, 0);
-    s->set_quality(s, 12);
+    s->set_quality(s, CAM_JPEG_QUALITY);
 
     ESP_LOGI(TAG, "Camera ready (OV3660 class sensor, JPEG)");
     return ESP_OK;

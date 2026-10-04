@@ -21,7 +21,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
     <div class="row">
       <div class="status-chips" id="status-chips"></div>
       <button class="btn btn-ghost btn-sm" id="btn-refresh" type="button">Refresh stream</button>
-      <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Toggle detection sounds">🔊 Sound on</button>
+      <button class="btn btn-ghost btn-sm" id="btn-sound" type="button" title="Disable detection sounds">🔊 Sound on</button>
     </div>
   </div>
 </section>

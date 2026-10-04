@@ -92,18 +92,31 @@
     if (j.ip) parts.push('<span class="chip">IP ' + esc(j.ip) + '</span>');
     parts.push('<span class="badge ' + (j.sprayActive ? 'badge-amber' : 'badge-no') + '">Spray ' +
       (j.sprayActive ? 'ACTIVE' : 'off') + '</span>');
+    /* Label the two detectors separately. "Conf" alone is ambiguous now that both
+     * can trigger a spray: it is the on-device FOMO score only. */
     if (typeof j.lastConfidence === 'number') {
-      parts.push('<span class="chip">Conf ' + j.lastConfidence.toFixed(2) + '</span>');
+      parts.push('<span class="chip">FOMO ' + j.lastConfidence.toFixed(2) + '</span>');
     }
     if (j.model) {
       parts.push('<span class="chip">' + esc(j.model) + '</span>');
     }
-    /* The overlay square is driven by the server-side YOLOv8 answer while the
-     * on-device model is still the pre-export stub, so say so plainly. */
+    /* The server-side YOLOv8 verdict. This can now trigger a spray in its own
+     * right, so it is labelled as a trigger source, not just an overlay. */
     if (j.vrf && j.vrf.valid) {
       parts.push('<span class="chip ' + (j.vrf.detected ? 'chip-verified' : 'chip-off') + '">' +
         'YOLO ' + Number(j.vrf.conf || 0).toFixed(2) + (j.vrf.detected ? ' hit' : ' clear') +
         '</span>');
+    }
+    /* Which detector is currently responsible for a detection, matching what the
+     * firmware actually ORs. Without this the panel cannot tell a device hit
+     * from a server hit. */
+    {
+      const sig = fecesSignal(j);
+      if (sig.detected) {
+        const label = sig.source === 'both' ? 'FOMO+YOLO'
+                    : (sig.source === 'server' ? 'via YOLOv8 server' : 'via FOMO device');
+        parts.push('<span class="chip chip-verified">Detected ' + esc(label) + '</span>');
+      }
     }
     if (typeof j.fps === 'number' && j.fps > 0) {
       parts.push('<span class="chip">' + j.fps + ' FPS</span>');
@@ -135,29 +148,50 @@
     const v = j.vrf;
     const vrfStale = !!(v && v.valid && Number(v.ageMs) > VRF_STALE_MS);
     const vrfFresh = !!(v && v.valid && !vrfStale);
-    /* Until a real FOMO model is exported the device reports fomo:stub, so the
-     * server-side YOLOv8 answer (vrf) is the only real detection available. */
-    if (vrfFresh) {
-      return {
-        detected: !!v.detected,
-        conf: Number(v.conf || 0),
-        present: true,
-        isPig: false,
-        useVrf: true,
-        vrfStale: false,
-        boxData: v,
-      };
-    }
-    /* The verifier is not answering, so fall back to the on-device FOMO class. */
-    const present = !!j.objectPresent && typeof j.classId === 'number' && j.classId >= 0;
+
+    /* Two detectors can spray, and the firmware ORs them: the on-device FOMO
+     * class, and the server-side YOLOv8 at server_trigger_conf. The picture and
+     * the sound must therefore follow the SAME union the relay follows --
+     * otherwise the UI contradicts the hardware (it showed "no detection" while
+     * the server was spraying).
+     *
+     * Each source is still reported separately, plus which one decided, because
+     * "FOMO hit 0.41" and "YOLOv8 hit 0.28" are materially different claims and
+     * the panel should not blur them into one green box.
+     *
+     * The verifier's answer is only trusted while fresh (see VRF_STALE_MS);
+     * a stale answer must not keep claiming a detection. */
+    const deviceDetected = !!(j.objectPresent && typeof j.classId === 'number' &&
+                             j.classId === 0);
+    const deviceConf = Number(j.lastConfidence || 0);
+    const serverDetected = vrfFresh ? !!v.detected : false;
+    const serverConf = vrfFresh ? Number(v.conf || 0) : 0;
+
+    const detected = deviceDetected || serverDetected;
+    let source = detected ? (deviceDetected && serverDetected ? 'both'
+                            : (deviceDetected ? 'fomo' : 'server'))
+                          : 'none';
+
+    /* Draw the box from whichever source produced the detection, preferring the
+     * device since its box is the one the on-device path used. */
+    const boxData = deviceDetected ? j.box : (serverDetected ? v : null);
+
     return {
-      detected: present && j.classId === 0,
-      conf: Number(j.lastConfidence || 0),
-      present: present,
-      isPig: present && j.classId === 1,
-      useVrf: false,
+      detected: detected,
+      conf: deviceDetected ? deviceConf : serverConf,
+      present: !!(j.objectPresent && typeof j.classId === 'number' && j.classId >= 0) ||
+               serverDetected,
+      isPig: !!(j.objectPresent && j.classId === 1) && !serverDetected,
+      source: source,
+      deviceDetected: deviceDetected,
+      deviceConf: deviceDetected ? deviceConf : null,
+      serverDetected: serverDetected,
+      serverConf: serverDetected ? serverConf : null,
+      /* Kept for callers that branch on which detector answered. `useVrf` now
+       * means "the verifier decided this detection on its own". */
+      useVrf: serverDetected && !deviceDetected,
       vrfStale: vrfStale,
-      boxData: j.box,
+      boxData: boxData,
     };
   }
 
@@ -165,8 +199,11 @@
    * WebAudio only, no asset files: two short oscillators per sound is enough
    * for a pen alarm and keeps the dashboard a single-script page.
    *
-   * Browsers refuse to start audio until a user gesture, so the alerter starts
-   * disarmed and is unlocked by the opt-in button. */
+   * Sound is enabled by default and the button mutes it. Browsers still refuse
+   * to start audio until a user gesture, so createAlerter() installs a one-shot
+   * unlock on the first interaction; until that fires, alarms are not scheduled
+   * at all (see canPlay) rather than being silently discarded on a suspended
+   * context. */
   const RETRIGGER_GAP_MS = 8000;
 
   function createAlerter(opts) {
@@ -218,7 +255,41 @@
       tone(150, 0.16, 'square', 0.10, t + 0.22);
     };
 
-    let audioOn = false;
+    /* Sound is ON by default; the button mutes it. No persistence is
+     * deliberate: a remembered mute would silently survive a reload and into a
+     * demo, where it reads as "the alarm didn't fire" rather than "someone
+     * muted the page". Starting on every load means a panel observer hears the
+     * alarm unless they choose otherwise. */
+    let audioOn = true;
+
+    /* Browsers refuse to start audio until a user gesture, so the flag above can
+     * be true while the AudioContext is still suspended -- which would mean the
+     * button claims sound is on and nothing plays. This one-shot unlock runs on
+     * the first real interaction anywhere and then removes itself, after which
+     * alarms work with no further opt-in.
+     *
+     * pointerdown AND keydown both matter: a keyboard user should not have to
+     * click to make sound legal, and a touch user should not need a key.
+     *
+     * canPlay() is the single source of truth for "will this actually be heard":
+     * it is derived from the live context state rather than tracked separately,
+     * so the flag cannot drift out of step with what the browser is doing. */
+    const canPlay = () => (actx !== null && actx.state === 'running');
+
+    const unlock = () => {
+      /* Only auto-enabled sound needs this. If the operator muted the page
+       * before their first gesture, do not silently start making noise. */
+      if (!audioOn) return;
+      ctx();
+      if (canPlay()) {
+        document.removeEventListener('pointerdown', unlock);
+        document.removeEventListener('keydown', unlock);
+      }
+    };
+    if (!canPlay()) {
+      document.addEventListener('pointerdown', unlock);
+      document.addEventListener('keydown', unlock);
+    }
     /* Latch rather than plain edge detection: one detection episode is one
      * alarm, however many polls span it. `armed` only returns true once the
      * signal has gone clear again. The gap floor covers the case where the
@@ -232,16 +303,27 @@
     if (btn) {
       btn.addEventListener('click', (e) => {
         e.target.blur();
+        /* Clicking the button IS a gesture, so this also unlocks audio for the
+         * case where the operator's first interaction is the mute toggle itself
+         * (they never touched the page body first). */
         ctx();
         audioOn = !audioOn;
-        e.target.textContent = audioOn ? '🔇 Sound off' : '🔊 Sound on';
+        /* Label states what is TRUE, not what a click would do: sound starts on,
+         * so the button reads "Sound on" until it is muted. Previously the label
+         * advertised the action, which is why "Sound on" used to mean "muted". */
+        e.target.textContent = audioOn ? '🔊 Sound on' : '🔇 Sound off';
         e.target.title = audioOn ? 'Disable detection sounds' : 'Enable detection sounds';
         /* Play the alarm once on enable so the operator can hear the tone,
          * length and loudness immediately rather than waiting for a real
          * detection to judge them. Deliberately does not touch `armed` or
          * `lastAlarmAt`: a preview must not consume the one alarm a detection
-         * episode is allowed, or a hit arriving seconds later would go silent. */
-        if (audioOn) fecesAlarm();
+         * episode is allowed, or a hit arriving seconds later would go silent.
+         *
+         * Only if the context is actually running: the click that unmutes also
+         * unlocks, so this normally plays. The guard covers the browsers that
+         * keep the context suspended for a tick after resume(), where scheduling
+         * would otherwise be discarded without any error. */
+        if (audioOn && canPlay()) fecesAlarm();
       });
     }
 
@@ -252,12 +334,18 @@
         /* The pig warning is a presence alarm, so it keys off `isPig` and not
          * off `detected`: a pig frame is never `detected` (detected means the
          * feces class), so gating it on that would make it unreachable. */
-        if (opts.pigBuzzer && s.isPig && audioOn) warnBuzzer();
+        if (opts.pigBuzzer && s.isPig && audioOn && canPlay()) warnBuzzer();
         if (!s.detected) {
           armed = true;
         } else {
           const now = Date.now();
-          if (audioOn && armed && (now - lastAlarmAt) >= RETRIGGER_GAP_MS) {
+          /* canPlay() matters now that sound is on by default: a detection in
+           * the first moments after load, before any click, would otherwise be
+           * scheduled on a suspended context and lost. Leaving `armed` set
+           * means the very next poll still alarms once audio is legal, so a
+           * real detection is never swallowed by the autoplay policy. */
+          if (audioOn && armed && canPlay() &&
+              (now - lastAlarmAt) >= RETRIGGER_GAP_MS) {
             fecesAlarm();
             lastAlarmAt = now;
             armed = false;

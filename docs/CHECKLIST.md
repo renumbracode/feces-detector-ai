@@ -29,7 +29,16 @@ Tick items off as they complete. Workflows for each step are in `docs/setup-guid
 - [ ] Flashed: `idf.py -p COMx flash monitor`
 - [x] Camera init OK (OV3660), `/stream` shows MJPEG (~7 fps confirmed)
 - [x] `/status` returns JSON (heap, spray, confidence, model)
-- [ ] Relay wired: `APP_PIN_RELAY` (GPIO 4) -> relay -> water pump
+- [ ] Relay wired: `APP_PIN_RELAY` (GPIO14) -> relay -> water pump; set
+      `relay_active_low` to match the module (see docs/wiring-guide.md)
+- [ ] Pump on its **own supply**, ground shared only, 1N4007 flyback diode fitted
+      (cathode to +). Sharing the board's 5 V rail caused a brownout in testing.
+- [ ] Pump on `NO`, not `NC`, and confirmed **off while the board is idle**
+- [ ] Active buzzer on GPIO21 and LED on GPIO1 — each load on its **own** pin.
+      Two GPIO outputs on one pad fight each other, so the buzzer must not share
+      GPIO14: the relay then never latches cleanly while the log still says
+      `Spray ON`. Driven by a steady DC level, so this suits an **active** buzzer
+      only; a passive one would need a tone (LEDC).
 - [x] On-device auto-spray triggers on detection (respects cooldown;
       E2E row id 7 "auto spray" + 8/9 "cooldown detected")
 
@@ -50,11 +59,19 @@ Tick items off as they complete. Workflows for each step are in `docs/setup-guid
 - [x] Live page shows ESP32 stream (CORS + stall fixes; `src=http://192.168.1.39/stream`)
 - [x] Manual spray works (Spray now button -> `/spray?duration=N`)
 - [ ] Auto-detection works: feces -> on-device spray -> history logs it
-      (partially: chain proven with interim FOMO stub; real trigger needs the
-      trained `feces` model)
+      (`/status` reports `"model":"fomo:2class"`. **Verified** for both paths:
+      FOMO `Spray ON` at `score=0.164`, and server-gated at `YOLOv8 conf=0.367
+      (>= 0.28)` writing a `yolo server spray` row. This model's FOMO scores
+      average ~0.25 (n=44, range 0.11-0.72), so the dial is set to 0.20;
+      tune with `POST /config threshold=`)
+- [ ] Server-gated spray reliable end to end — depends on the verify leg staying
+      reachable. Check `verifyOk` / `verifyFailures` on `/status`; a climbing
+      `verifyFailures` with `verifyOk:false` is a network problem, not a model one
 - [ ] YOLOv8 verified badge appears on logged detections
-      (needs real trained model; interim COCO model reports uclass:none)
 - [ ] Threshold / cooldown / spray duration tuned
+- [ ] AP set to 2.4 GHz / **20 MHz** channel width (see docs/wiring-guide.md —
+      a 40 MHz channel gave 3-53% loss at good RSSI)
+- [ ] Laptop/servers on **static IPs** (board is pinned to `192.168.1.39`)
 - [ ] Detection metrics recorded in `training/notes/`
 
 ## Phase 6 — Panel

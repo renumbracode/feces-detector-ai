@@ -41,14 +41,19 @@ extern "C" {
 
 /* Minimum FOMO cell score for a box to be reported as a detection. This is a
  * fixed noise floor only, NOT the recall<->precision knob: anything that
- * clears 0.30 becomes a candidate, and the runtime spray dial (web /config
+ * clears it becomes a candidate, and the runtime spray dial (web /config
  * -> threshold, NVS-backed) makes the final spray decision. Keeping the floor
  * below the dial range is deliberate -- a floor above the dial would silently
- * drop detections the dial could otherwise accept. NOTE: the exported model's
- * own FOMO post-process (model_variables.h: ei_fill_result_fomo_i8_config_*
- * .threshold) already drops boxes below 0.5, so the effective presentation
- * floor is really 0.5 unless that generated constant is lowered and rebuilt. */
-#define EI_FOMO_PRESENT_THRESHOLD 0.30f
+ * drop detections the dial could otherwise accept.
+ *
+ * Lowered from 0.30 to 0.05 for calibration. The SDK's own generated floor in
+ * model_variables.h (ei_fill_result_fomo_i8_config_*.threshold) is now 0.10, so
+ * a 0.30 filter here would hide every score in between and make it impossible
+ * to see what the model actually produces for the pen. At 0.05 this code is a
+ * near-passthrough and /status reports the model's real score, so the spray
+ * threshold can be set from a measurement instead of a guess. Raise it again
+ * once the threshold is calibrated. */
+#define EI_FOMO_PRESENT_THRESHOLD 0.05f
 
 #if defined(__has_include)
 #  if __has_include("edge-impulse-sdk/classifier/ei_run_classifier.h")
@@ -243,6 +248,15 @@ ei_impulse_result_t result = { 0 };
     }
 
     out->object_present = out->class_id == EI_CLASS_FECES;
+    /* Report the actual winning score, not just the box count. When the model
+     * is not seeing feces this prints score=0.00 class=none, which is how we
+     * tell "model found nothing" apart from "model found something too weak to
+     * act on" -- the two look identical from /status otherwise. */
+    ESP_LOGI(TAG, "fomo: best=%s score=%.3f class=%d (floor %.2f)",
+             (pick >= 0) ? result.bounding_boxes[pick].label : "none",
+             (double)out->score, (int)out->class_id,
+             (double)EI_FOMO_PRESENT_THRESHOLD);
+
     *elapsed_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000u);
     return true;
 }

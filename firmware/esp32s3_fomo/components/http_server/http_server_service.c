@@ -14,6 +14,8 @@
  * camera task can keep feeding frames; the MJPEG boundary is standard.
  */
 #include <string.h>
+#include <strings.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -32,12 +34,40 @@
 #include "inference_service.h"
 #include "spray_controller.h"
 #include "detection_service.h"
+#include "wifi_service.h"
 #include "http_server_service.h"
 
 static const char *TAG = "http_svc";
 #define STREAM_BOUNDARY "fomodetectboundary"
 #define STREAM_PART "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n"
+
+/* Stream pacing bounds. The interval is the delay AFTER a frame is sent, so it
+ * adds to the send time rather than replacing it.
+ *
+ * 40 ms is the historical fixed delay (~25 fps on a healthy link). The 500 ms
+ * ceiling matters on a degraded link: MJPEG over TCP cannot drop frames, so a
+ * congested socket stalls the whole task, and pushing faster only deepens the
+ * backlog. Slower-but-current video is far more useful for checking the pen
+ * than fast-but-frozen video. */
+#define STREAM_INTERVAL_MIN_MS 40
+#define STREAM_INTERVAL_MAX_MS 500
+#define STREAM_INTERVAL_STEP_MS 40
+
 uint64_t g_start_us;
+
+/* Real MJPEG throughput, surfaced by /status. This used to be hardcoded to 0,
+ * which made the stream rate unmeasurable and left the frame budget
+ * untunable -- the only way to judge a change was to time downloads. A float
+ * store is a single 32-bit write, so /status reading it concurrently is safe
+ * without a lock. */
+static volatile uint32_t s_stream_frames = 0;
+static volatile float s_stream_fps = 0.0f;
+static volatile int64_t s_stream_window_ms = 0;
+
+/* Adaptive stream pacing. Owned by the stream task only (it is reset per
+ * viewer in handler_stream), so no locking is needed. */
+static uint32_t s_stream_interval_ms = STREAM_INTERVAL_MIN_MS;
+static int consecutive_errors = 0;
 
 static const char *wifi_ip_str(void);
 
@@ -91,23 +121,35 @@ static esp_err_t handler_status(httpd_req_t *req)
     if (tly < 0.0f) tly = 0.0f;
     if (tlx + last.width > 1.0f) tlx = 1.0f - last.width;
     if (tly + last.height > 1.0f) tly = 1.0f - last.height;
-    char buf[1024];
+    char buf[1280];
     /* vrf = the server-side YOLOv8 answer for the live frame, polled on a
-     * fixed cadence so the dashboard overlay has a real detection even while
-     * the on-device FOMO model is still a stub. Display only; it never gates
-     * the relay. */
+     * fixed cadence so the dashboard overlay always has an independent
+     * opinion. Display only: it never gates the relay, which stays on the
+     * on-device FOMO class in detection_task(). */
     verify_result_t vr;
     detection_service_verify_result(&vr);
+
+    /* Link telemetry. rssi is reported as the raw dBm when associated, and
+     * as the sentinel below when not, so the dashboard can distinguish "weak
+     * but connected" from "offline". wifiReconnects counts consecutive failed
+     * association attempts and resets on success, so a rising value is an
+     * early warning that the link is degrading. */
+    int rssi = wifi_service_rssi();
+    if (rssi == INT8_MIN) rssi = -128;
+
     int n = snprintf(buf, sizeof(buf),
-        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":0,\"model\":\"%s\","
+        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":%.1f,\"model\":\"%s\","
         "\"sprayActive\":%s,\"cooldownActive\":%s,"
         "\"lastConfidence\":%.4f,\"objectPresent\":%s,"
         "\"classId\":%d,\"box\":{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
         "\"vrf\":{\"valid\":%s,\"detected\":%s,\"conf\":%.4f,\"ageMs\":%u,"
         "\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
+        "\"wifiRssi\":%d,\"wifiConnected\":%s,\"wifiReconnects\":%u,"
+        "\"verifyOk\":%s,\"verifyFailures\":%u,\"verifyOkAgeMs\":%llu,"
         "\"lastSprayAgoMs\":%llu,\"uptimeS\":%llu,"
         "\"inferenceMs\":%u,\"detections\":%u}",
         wifi_ip_str(), (unsigned)free_sram,
+        (double)s_stream_fps,
         edge_impulse_model_tag(),
         sp.spraying ? "true" : "false",
         sp.cooldown_active ? "true" : "false",
@@ -121,6 +163,19 @@ static esp_err_t handler_status(httpd_req_t *req)
         (double)vr.conf,
         (unsigned)vr.age_ms,
         (double)vr.x, (double)vr.y, (double)vr.w, (double)vr.h,
+        rssi,
+        wifi_service_is_connected() ? "true" : "false",
+        (unsigned)wifi_service_reconnect_attempts(),
+        /* Verifier leg health, so "VERIFY OFFLINE" can be attributed to the
+         * server or to the board. verifyOkAgeMs is the age of the last ACCEPTED
+         * answer; if it climbs far beyond the poll interval while verifyOk is
+         * false, the poll leg itself has stalled rather than the server being
+         * unreachable. -1 means no answer has ever been accepted. */
+        detection_service_verify_ok() ? "true" : "false",
+        (unsigned)detection_service_verify_failures(),
+        detection_service_last_verify_ok_age_ms() == UINT64_MAX
+            ? (unsigned long long)-1
+            : (unsigned long long)detection_service_last_verify_ok_age_ms(),
         (unsigned long long)sp.last_spray_ago_ms,
         (unsigned long long)(esp_timer_get_time() / 1000000u),
         (unsigned)last.inference_ms,
@@ -159,9 +214,15 @@ static esp_err_t handler_config(httpd_req_t *req)
 
     char buf[512];
     int n = snprintf(buf, sizeof(buf),
-        "{\"threshold\":%.2f,\"cooldown_ms\":%u,\"spray_ms\":%u,"
+        "{\"threshold\":%.2f,\"server_trigger_conf\":%.2f,"
+        "\"cooldown_ms\":%u,\"spray_ms\":%u,"
+        "\"relay_active_low\":%s,"
+        "\"static_ip\":\"%s\",\"static_mask\":\"%s\",\"static_gw\":\"%s\","
         "\"verify_url\":\"%s\",\"dash_url\":\"%s\",\"dash_verify_url\":\"%s\"}",
-        (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
+        (double)cfg.threshold, (double)cfg.server_trigger_conf,
+        (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
+        cfg.relay_active_low ? "true" : "false",
+        cfg.static_ip, cfg.static_mask, cfg.static_gw,
         cfg.verify_url, cfg.dash_url, cfg.dash_verify_url);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
@@ -294,11 +355,67 @@ static esp_err_t handler_config_post(httpd_req_t *req)
         float t = strtof(val, NULL);
         if (t >= 0.0f && t <= 1.0f) cfg.threshold = t;
     }
+    /* YOLOv8 confidence that triggers a spray. Separate from `threshold` above
+     * because the server model and the on-device model are not calibrated
+     * against each other. */
+    if (httpd_query_key_value(body, "server_trigger_conf", val, sizeof(val)) == ESP_OK) {
+        float t = strtof(val, NULL);
+        if (t >= 0.0f && t <= 1.0f) cfg.server_trigger_conf = t;
+    }
     if (httpd_query_key_value(body, "cooldown_ms", val, sizeof(val)) == ESP_OK) {
         cfg.cooldown_ms = (uint32_t)strtoul(val, NULL, 10);
     }
     if (httpd_query_key_value(body, "spray_ms", val, sizeof(val)) == ESP_OK) {
         cfg.spray_ms = (uint32_t)strtoul(val, NULL, 10);
+    }
+    /* Optional static addressing. All three must be supplied together; the
+     * loader rejects a partial set so a half-configured address cannot strand
+     * the board with no route to correct it. Send empty strings to return to
+     * DHCP. */
+    {
+        const char *keys[3] = { "static_ip", "static_mask", "static_gw" };
+        char *dst[3] = { cfg.static_ip, cfg.static_mask, cfg.static_gw };
+        size_t sizes[3] = { sizeof(cfg.static_ip), sizeof(cfg.static_mask),
+                            sizeof(cfg.static_gw) };
+        int supplied = 0;
+        bool valid = true;
+        for (int i = 0; i < 3; i++) {
+            if (httpd_query_key_value(body, keys[i], val, sizeof(val)) != ESP_OK) {
+                continue;
+            }
+            supplied++;
+            /* Validate before storing: a typo'd mask is worse than no mask,
+             * because it silently breaks reachability. */
+            if (val[0] != '\0' && esp_ip4addr_aton(val) == 0) {
+                ESP_LOGW(TAG, "%s='%s' is not a dotted-quad IPv4; ignored",
+                         keys[i], val);
+                valid = false;
+                continue;
+            }
+            strncpy(dst[i], val, sizes[i] - 1);
+            dst[i][sizes[i] - 1] = '\0';
+        }
+        if (supplied == 3 && valid) {
+            ESP_LOGI(TAG, "Static addressing requested; rebooting to apply");
+        } else if (supplied > 0) {
+            ESP_LOGW(TAG, "Static address needs ip+mask+gw together; keeping "
+                          "previous setting");
+        }
+    }
+
+    /* Relay IN polarity, as 1/0 or true/false. Accept the JSON-ish spelling so
+     * this can be flipped with a plain curl without a rebuild -- the usual way
+     * to discover it is: fire /spray and watch whether the relay actually
+     * clicks. */
+    if (prv_get_decoded(body, "relay_active_low", val, sizeof(val)) && val[0]) {
+        if (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0) {
+            cfg.relay_active_low = true;
+        } else if (strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0) {
+            cfg.relay_active_low = false;
+        } else {
+            ESP_LOGW(TAG, "relay_active_low '%s' not understood, keeping %s",
+                     val, cfg.relay_active_low ? "active-low" : "active-high");
+        }
     }
 
     app_config_save(&cfg);
@@ -319,7 +436,7 @@ static esp_err_t handler_setup(httpd_req_t *req)
     app_config_t cfg;
     app_config_load(&cfg);
 
-    char *page = malloc(3072);
+    char *page = malloc(4608);
     if (page == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
         return ESP_OK;
@@ -334,13 +451,18 @@ static esp_err_t handler_setup(httpd_req_t *req)
     prv_html_escape(cfg.verify_url, esc_verify, sizeof(esc_verify));
     prv_html_escape(cfg.dash_url, esc_dash, sizeof(esc_dash));
     prv_html_escape(cfg.dash_verify_url, esc_dash_v, sizeof(esc_dash_v));
+    /* Addresses go into value='...' too, so escape them the same way. */
+    char esc_static_ip[24], esc_static_mask[24], esc_static_gw[24];
+    prv_html_escape(cfg.static_ip, esc_static_ip, sizeof(esc_static_ip));
+    prv_html_escape(cfg.static_mask, esc_static_mask, sizeof(esc_static_mask));
+    prv_html_escape(cfg.static_gw, esc_static_gw, sizeof(esc_static_gw));
 
-    int n = snprintf(page, 3072,
+    int n = snprintf(page, 4608,
         "<!doctype html><html><head><title>Feces Detector setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
         "margin:40px;line-height:1.6}label{display:block;margin-top:12px;font-size:14px}"
-        "input{width:100%%;padding:8px;margin:6px 0;border-radius:6px;"
+        "input,select{width:100%%;padding:8px;margin:6px 0;border-radius:6px;"
         "border:1px solid #334155;background:#1e293b;color:#e2e8f0;box-sizing:border-box}"
         "button{padding:10px 18px;border:0;border-radius:6px;background:#34d399;"
         "color:#064e3b;font-weight:600;margin-top:16px}code{background:#1e293b;"
@@ -357,15 +479,40 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "value='%s' maxlength='256'>"
         "<label>Detection threshold (0..1) — spray dial</label><input type='number' step='0.01' "
         "name='threshold' value='%.2f' min='0' max='1'>"
+        "<label>YOLOv8 trigger confidence (0..1) — server-gated spray</label>"
+        "<input type='number' step='0.01' name='server_trigger_conf' value='%.2f' "
+        "min='0' max='1'>"
+        "<p style='font-size:13px;color:#94a3b8'>A server YOLOv8 box at or above "
+        "this confidence sprays, same as the device FOMO class. Needs the verify "
+        "server reachable.</p>"
+        "<label>Static IP (optional)</label><input name='static_ip' value='%s' "
+        "placeholder='leave blank for DHCP'>"
+        "<label>Subnet mask</label><input name='static_mask' value='%s' "
+        "placeholder='255.255.255.0'>"
+        "<label>Gateway</label><input name='static_gw' value='%s' "
+        "placeholder='192.168.1.1'>"
+        "<p style='font-size:13px;color:#94a3b8'>All three together, or all blank. "
+        "A static address stops the router handing out a new one, which would "
+        "otherwise break the dashboard's saved link to this board.</p>"
         "<label>Cooldown ms</label><input type='number' step='1000' name='cooldown_ms' "
         "value='%u'>"
         "<label>Spray duration ms</label><input type='number' step='100' name='spray_ms' "
         "value='%u'>"
+        "<label>Relay IN polarity</label><select name='relay_active_low'>"
+        "<option value='1'%s>Active-LOW — IN pulled to GND fires (KY-019, SRD-05VDC)</option>"
+        "<option value='0'%s>Active-HIGH — IN pulled to VCC fires</option></select>"
+        "<p style='font-size:13px;color:#94a3b8'>Unsure? Fire "
+        "<code>GET /spray?duration=3000</code>. If the LED and buzzer respond but "
+        "the relay stays silent, this module is active-HIGH — switch it and "
+        "reboot.</p>"
         "<button type='submit'>Save &amp; restart</button></form>"
         "</body></html>",
         esc_ssid, esc_pass, esc_verify, esc_dash, esc_dash_v,
-        (double)cfg.threshold, (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms);
-
+        (double)cfg.threshold, (double)cfg.server_trigger_conf,
+        esc_static_ip, esc_static_mask, esc_static_gw,
+        (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
+        cfg.relay_active_low ? " selected" : "",
+        cfg.relay_active_low ? "" : " selected");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, page, n);
     free(page);
@@ -383,6 +530,8 @@ static void stream_task(void *arg)
 {
     httpd_req_t *req = (httpd_req_t *)arg;
     char part_hdr[64];
+    ESP_LOGI(TAG, "stream client connected, starting at %u ms/frame",
+             (unsigned)s_stream_interval_ms);
 
     while (true) {
         camera_fb_t *fb = camera_service_get_frame();
@@ -390,6 +539,15 @@ static void stream_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+
+        /* Measure how long the send actually takes. On a healthy link this is
+         * single-digit milliseconds; on a stalled one it grows to hundreds,
+         * because MJPEG rides TCP and a lost segment blocks the socket until it
+         * retransmits. That duration is the only honest measure of how fast this
+         * link can actually carry video, and it is what the pacing below uses.
+         * Without it the task would keep pushing at the nominal rate into a link
+         * that cannot drain it, which is what produced a frozen picture. */
+        int64_t send_start_us = esp_timer_get_time();
 
         httpd_resp_send_chunk(req, "--" STREAM_BOUNDARY "\r\n", HTTPD_RESP_USE_STRLEN);
         int h = snprintf(part_hdr, sizeof(part_hdr), STREAM_PART, (unsigned)fb->len);
@@ -402,11 +560,67 @@ static void stream_task(void *arg)
         }
         camera_service_release_frame(fb);
 
+        int64_t send_ms = (esp_timer_get_time() - send_start_us) / 1000;
+
+        /* A failed send is not treated as fatal. The old code broke out of the
+         * loop immediately, so one lost chunk ended the whole stream and the
+         * browser showed a permanently frozen image with no way to recover
+         * short of reloading the page. Now only a definite disconnect ends it;
+         * a slow or transient error just costs one frame. */
         if (res != ESP_OK) {
-            break; /* client disconnected or send failed */
+            /* httpd_resp_send_chunk returns ESP_FAIL when the client has gone
+             * away, and ESP_ERR_HTTPD_RESP_SEND for a mid-flight write failure
+             * where the socket is congested but the peer may still be there.
+             * Only the definite disconnect ends the stream immediately; a send
+             * error just costs a few frames and a pause. */
+            bool fatal = (res == ESP_FAIL);
+            consecutive_errors++;
+            if (fatal || consecutive_errors > 20) {
+                ESP_LOGW(TAG, "stream ending after %d send error(s), last=%s",
+                         consecutive_errors, esp_err_to_name(res));
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(40)); /* ~25 fps target; inference runs in detect task */
+        consecutive_errors = 0;
+
+        /* Adaptive frame interval. Start at the historical 40 ms (~25 fps) and
+         * back off toward 500 ms as sends get slower, recovering toward the
+         * target once the link is healthy again. The floor keeps the view
+         * watchable over a bad link instead of stalling completely; the ceiling
+         * bounds how long the operator stares at a stale frame.
+         *
+         * Frame time on a healthy link is well under the interval, so this only
+         * slows down when the link genuinely cannot keep up. */
+        if (send_ms > s_stream_interval_ms) {
+            s_stream_interval_ms += STREAM_INTERVAL_STEP_MS;
+            if (s_stream_interval_ms > STREAM_INTERVAL_MAX_MS) {
+                s_stream_interval_ms = STREAM_INTERVAL_MAX_MS;
+            }
+        } else if (send_ms * 2 < s_stream_interval_ms) {
+            /* Comfortably ahead of the link: creep back up. */
+            s_stream_interval_ms -= STREAM_INTERVAL_STEP_MS;
+            if (s_stream_interval_ms < STREAM_INTERVAL_MIN_MS) {
+                s_stream_interval_ms = STREAM_INTERVAL_MIN_MS;
+            }
+        }
+
+        /* Account only frames that actually went out, so a stalled socket
+         * cannot inflate the reported rate. */
+        s_stream_frames++;
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms - s_stream_window_ms >= 1000) {
+            int64_t span = now_ms - s_stream_window_ms;
+            s_stream_fps = (float)s_stream_frames * 1000.0f / (float)span;
+            s_stream_frames = 0;
+            s_stream_window_ms = now_ms;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(s_stream_interval_ms));
     }
+    ESP_LOGI(TAG, "stream client gone; final interval %u ms/frame",
+             (unsigned)s_stream_interval_ms);
     camera_streaming_stop();
     httpd_req_async_handler_complete(req);
     vTaskDelete(NULL);
@@ -417,6 +631,14 @@ static esp_err_t handler_stream(httpd_req_t *req)
     prv_cors(req);
     httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
     camera_streaming_start();
+    /* Start a fresh measurement window per viewer, so /status reports the rate
+     * of the stream actually being consumed. */
+    s_stream_frames = 0;
+    s_stream_window_ms = esp_timer_get_time() / 1000;
+    /* Per-viewer pacing state, so one slow client cannot leave the next viewer
+     * inheriting a permanently throttled frame interval. */
+    s_stream_interval_ms = STREAM_INTERVAL_MIN_MS;
+    consecutive_errors = 0;
 
     httpd_req_t *async_req = NULL;
     esp_err_t err = httpd_req_async_handler_begin(req, &async_req);

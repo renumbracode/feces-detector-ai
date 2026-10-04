@@ -3,7 +3,9 @@
 Automated pigpen cleaning with a **hybrid edge + server** architecture and **no Raspberry Pi**:
 
 - An **ESP32-S3 + OV3660** camera runs a lightweight **Edge Impulse FOMO**
-  model **on-device**, so fast, low-latency auto-cleaning works fully offline.
+  model **on-device**, so auto-cleaning works offline. A second, *additional*
+  trigger uses the server-side YOLOv8 verdict, which is better at low confidence but
+  needs the PC reachable; the on-device path is what keeps working when it isn't.
 - On detection it drives a relay to run a **water pump** that sprays the pen.
 - Detected frames are uploaded to a **Python YOLOv8 verification server**
   that re-checks them with a full detection model (unmodified YOLOv8 cannot
@@ -23,17 +25,21 @@ Automated pigpen cleaning with a **hybrid edge + server** architecture and **no 
 ESP32-S3 + OV3660 (ESP-IDF firmware)
   - captures frame
   - Edge Impulse FOMO INT8 inference (on-device, lightweight)
-  - detection above threshold + cooldown -> GPIO relay -> water pump -> spray
+  - detection above threshold -> GPIO relay -> water pump -> spray
+- detection above threshold, cooldown -> buzzer + LED (pump held back)
   - logs event to dashboard API
   - uploads detected frames to YOLOv8 verify server
   - serves /stream, /status, /spray
            |
-           |  Wi-Fi (same LAN)
+           |  Wi-Fi (same LAN, or a phone hotspot)
            v
 XAMPP server:
   - Python YOLOv8 verify API  (server/yolo_verify)  -> POST /verify
   - CodeIgniter 3 + MySQL dashboard (detection log, stats, live view, manual spray)
 ```
+
+No router is required — a phone hotspot works as the shared network. See
+[setup-guide.md §7](docs/setup-guide.md#7-mobile-hotspot-no-router).
 
 ## Folder layout
 
