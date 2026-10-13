@@ -293,6 +293,56 @@ gives you a board on the new SSID with round 2 still to do. If esptool reports
 This is also the easiest way to go **back** to a previous network, and unlike
 `POST /config` it needs no network path to the device at all.
 
+#### Writing the whole config in one flash (no round 2)
+
+Two rounds are only needed because round 2 requires reaching the board. If you
+already know the laptop's address on the new network, skip that by writing every
+key at once. The CSV is longer, and three entries are easy to get wrong:
+
+```
+key,type,encoding,value
+fomo_app,namespace,,
+wifi_ssid,data,string,"<ssid>"
+wifi_pass,data,string,"<password>"
+verify_url,data,string,http://<LAPTOP_IP>:8000/verify
+dash_url,data,string,http://<LAPTOP_IP>/feces-detector-ai/dashboard/api/insert
+dash_verify_url,data,string,http://<LAPTOP_IP>/feces-detector-ai/dashboard/api/verify
+static_ip,data,string,<ESP_IP>
+static_mask,data,string,255.255.255.0
+static_gw,data,string,<ROUTER_IP>
+threshold,data,hex2bin,9a99193f
+srv_trig_conf,data,hex2bin,295c8f3e
+cooldown_ms,data,u32,30000
+spray_ms,data,u32,5000
+relay_act_low,data,u8,1
+```
+
+- **`threshold` and `srv_trig_conf` are `hex2bin`, not `u32`.** They are stored
+  as a raw 4-byte `float` blob (`app_config.c:167,171`), so they must be
+  little-endian. `0.60` = `9a99193f`, `0.28` = `295c8f3e`, `0.75` = `0000403f`.
+  Writing `0.60` as a `u32` does not error — it silently leaves
+  `APP_DEFAULT_THRESHOLD` standing. Compute with
+  `python -c "import struct;print(struct.pack('<f',0.60).hex())"`.
+- **Write all three `static_*` keys, or none.** `prv_load_static`
+  (`app_config.c:83`) discards an incomplete set and falls back to DHCP, leaving
+  the board at an address you have to go and discover.
+- Keys are capped at **15 characters** (`app_config.h:13`), which is why the
+  constants are `relay_act_low` and `srv_trig_conf` rather than the readable
+  `relay_active_low` / `server_trigger_conf`.
+
+Static addressing changes what the boot log looks like: `GOT_IP` never fires
+because the DHCP client is stopped, so the success lines are
+`app_cfg: Static IP configured: <ip>/<mask> gw <gw>` and
+`wifi_svc: WiFi connected`. `wifi_svc: AP unreachable after 30 s` means the
+credentials or WPA mode are wrong — and because detection and spray keep running
+offline, the board still looks alive, so do not assume "it is working" from the
+dashboard alone.
+
+Verify with `GET /config`, which echoes back every key in the CSV **except**
+`wifi_ssid`/`wifi_pass`. That read-back is the only confirmation that the
+tuning values landed: they are what you typed, not what the board was running
+before the rewrite.
+
 > **You cannot read the saved Wi-Fi credentials back off the board.**
 > `GET /config` returns only the tuning values and the three URLs — not
 > `wifi_ssid` or `wifi_pass` — so once you overwrite them the previous password
