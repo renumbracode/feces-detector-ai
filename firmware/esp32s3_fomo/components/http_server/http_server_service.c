@@ -64,6 +64,19 @@ static volatile uint32_t s_stream_frames = 0;
 static volatile float s_stream_fps = 0.0f;
 static volatile int64_t s_stream_window_ms = 0;
 
+/* Byte-rate accounting, used to keep the stream from saturating the link.
+ *
+ * The adaptive interval below used to react only to how long a send took, which
+ * is blind to frame SIZE. At 48 KB/frame a send can be slow simply because the
+ * frame is large, so the loop kept the rate high and filled the socket until
+ * /status could not get a connection behind it. Tracking bytes/sec gives the
+ * pacer a second, independent signal: it can hold the stream under a budget and
+ * leave headroom for every other endpoint on the same TCP path. */
+static volatile uint32_t s_stream_bytes = 0;
+static volatile uint32_t s_stream_bps = 0;
+#define STREAM_BUDGET_BPS 61440u  /* 60 KB/s: leaves room for /status and /spray */
+#define STREAM_BPS_STEP    4096u
+
 /* Adaptive stream pacing. Owned by the stream task only (it is reset per
  * viewer in handler_stream), so no locking is needed. */
 static uint32_t s_stream_interval_ms = STREAM_INTERVAL_MIN_MS;
@@ -112,6 +125,11 @@ static esp_err_t handler_status(httpd_req_t *req)
     fomo_result_t last;
     inference_service_latest(&last);
 
+    /* Expose the measured stream byte rate alongside fps. fps alone hides the
+     * failure mode that matters: a low-fps stream caused by oversized frames
+     * looks the same as one caused by a bad link, and the two have different
+     * fixes (lower CAM_JPEG_QUALITY vs. improve Wi-Fi). */
+    uint32_t stream_bps_snapshot = s_stream_bps;
     uint32_t free_sram = (uint32_t)esp_get_free_heap_size();
     /* fomo_result_t stores x,y as the box CENTROID; the dashboard overlay
      * draws from the top-left corner, so convert here. */
@@ -138,7 +156,7 @@ static esp_err_t handler_status(httpd_req_t *req)
     if (rssi == INT8_MIN) rssi = -128;
 
     int n = snprintf(buf, sizeof(buf),
-        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":%.1f,\"model\":\"%s\","
+        "{\"ip\":\"%s\",\"heap\":%u,\"fps\":%.1f,\"streamBps\":%u,\"model\":\"%s\","
         "\"sprayActive\":%s,\"cooldownActive\":%s,"
         "\"lastConfidence\":%.4f,\"objectPresent\":%s,"
         "\"classId\":%d,\"box\":{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
@@ -150,6 +168,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"inferenceMs\":%u,\"detections\":%u}",
         wifi_ip_str(), (unsigned)free_sram,
         (double)s_stream_fps,
+        (unsigned)stream_bps_snapshot,
         edge_impulse_model_tag(),
         sp.spraying ? "true" : "false",
         sp.cooldown_active ? "true" : "false",
@@ -548,6 +567,7 @@ static void stream_task(void *arg)
          * Without it the task would keep pushing at the nominal rate into a link
          * that cannot drain it, which is what produced a frozen picture. */
         int64_t send_start_us = esp_timer_get_time();
+        size_t fb_len = fb->len;
 
         httpd_resp_send_chunk(req, "--" STREAM_BOUNDARY "\r\n", HTTPD_RESP_USE_STRLEN);
         int h = snprintf(part_hdr, sizeof(part_hdr), STREAM_PART, (unsigned)fb->len);
@@ -585,6 +605,20 @@ static void stream_task(void *arg)
         }
         consecutive_errors = 0;
 
+        /* Account only frames that actually went out, so a stalled socket
+         * cannot inflate the reported rate. */
+        s_stream_frames++;
+        s_stream_bytes += (uint32_t)fb_len;
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms - s_stream_window_ms >= 1000) {
+            int64_t span = now_ms - s_stream_window_ms;
+            s_stream_fps = (float)s_stream_frames * 1000.0f / (float)span;
+            s_stream_bps = (uint32_t)((uint64_t)s_stream_bytes * 1000u / (uint64_t)span);
+            s_stream_frames = 0;
+            s_stream_bytes = 0;
+            s_stream_window_ms = now_ms;
+        }
+
         /* Adaptive frame interval. Start at the historical 40 ms (~25 fps) and
          * back off toward 500 ms as sends get slower, recovering toward the
          * target once the link is healthy again. The floor keeps the view
@@ -593,28 +627,24 @@ static void stream_task(void *arg)
          *
          * Frame time on a healthy link is well under the interval, so this only
          * slows down when the link genuinely cannot keep up. */
-        if (send_ms > s_stream_interval_ms) {
+        bool over_send  = send_ms > s_stream_interval_ms;
+        bool over_budget = s_stream_bps > STREAM_BUDGET_BPS;
+
+        if (over_send || over_budget) {
             s_stream_interval_ms += STREAM_INTERVAL_STEP_MS;
             if (s_stream_interval_ms > STREAM_INTERVAL_MAX_MS) {
                 s_stream_interval_ms = STREAM_INTERVAL_MAX_MS;
             }
-        } else if (send_ms * 2 < s_stream_interval_ms) {
-            /* Comfortably ahead of the link: creep back up. */
+        } else if (send_ms * 2 < s_stream_interval_ms
+                   && s_stream_bps < STREAM_BUDGET_BPS * 3 / 4) {
+            /* Comfortably ahead of the link on BOTH signals: creep back up.
+             * The byte-rate guard matters as much as the send-time one --
+             * without it the pacer recovers to a rate that refills the socket
+             * and starves /status within a few seconds. */
             s_stream_interval_ms -= STREAM_INTERVAL_STEP_MS;
             if (s_stream_interval_ms < STREAM_INTERVAL_MIN_MS) {
                 s_stream_interval_ms = STREAM_INTERVAL_MIN_MS;
             }
-        }
-
-        /* Account only frames that actually went out, so a stalled socket
-         * cannot inflate the reported rate. */
-        s_stream_frames++;
-        int64_t now_ms = esp_timer_get_time() / 1000;
-        if (now_ms - s_stream_window_ms >= 1000) {
-            int64_t span = now_ms - s_stream_window_ms;
-            s_stream_fps = (float)s_stream_frames * 1000.0f / (float)span;
-            s_stream_frames = 0;
-            s_stream_window_ms = now_ms;
         }
 
         vTaskDelay(pdMS_TO_TICKS(s_stream_interval_ms));
@@ -634,6 +664,8 @@ static esp_err_t handler_stream(httpd_req_t *req)
     /* Start a fresh measurement window per viewer, so /status reports the rate
      * of the stream actually being consumed. */
     s_stream_frames = 0;
+    s_stream_bytes = 0;
+    s_stream_bps = 0;
     s_stream_window_ms = esp_timer_get_time() / 1000;
     /* Per-viewer pacing state, so one slow client cannot leave the next viewer
      * inheriting a permanently throttled frame interval. */

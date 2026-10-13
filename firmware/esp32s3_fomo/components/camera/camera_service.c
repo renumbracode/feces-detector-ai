@@ -44,15 +44,26 @@ static const char *TAG = "camera_svc";
  * model's input width. */
 #define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720 */
 
-/* jpeg_quality 0-63, and LOWER means higher quality on OV-series sensors, so
- * this is deliberately low. The cost is bytes on the wire: MJPEG rides TCP, so
- * a bigger frame means more time per frame on a lossy link. That tradeoff is
- * real but it is the wrong thing to trade away -- starving the model of
- * resolution costs detection accuracy outright, whereas a slower live view
- * still shows the same thing. Prefer fixing latency by pacing the stream (see
- * the adaptive interval in http_server_service.c) over by resampling the
- * sensor. */
-#define CAM_JPEG_QUALITY 12
+/* jpeg_quality 0-63, and LOWER means higher quality on OV-series sensors.
+ *
+ * This was 12, which is near-lossless and produced ~48 KB frames at 1280x720.
+ * On this board's link (RSSI -61..-76 dBm, ping ~180 ms, measured ceiling
+ * ~6 KB/s) a 48 KB frame takes ~8 s to send, so the live view ran at 0.09 fps
+ * and /status timed out behind the saturated socket.
+ *
+ * 30 keeps the sensor at full 1280x720 for detection while cutting frame size
+ * to roughly 10-15 KB. Nothing downstream needs more: FOMO consumes a 160x160
+ * thumbnail, so detection accuracy is untouched. Resolution is worth
+ * protecting; JPEG fidelity on a pen floor is not. If the stream ever needs to
+ * be richer, raise this toward 20 -- do NOT go back toward 12.
+ */
+#define CAM_JPEG_QUALITY 30
+
+/* What CAM_FRAMESIZE is supposed to produce. Only used to warn at boot when the
+ * sensor negotiates something else, so a resolution surprise is visible in the
+ * boot log instead of silently degrading the model input. */
+#define EXPECTED_WIDTH  1280
+#define EXPECTED_HEIGHT 720
 
 static volatile bool s_streaming = false;
 static volatile int s_streaming_refs = 0;
@@ -104,6 +115,33 @@ esp_err_t camera_service_init(void)
     s->set_contrast(s, 0);
     s->set_saturation(s, 0);
     s->set_quality(s, CAM_JPEG_QUALITY);
+
+    /* Report what the sensor ACTUALLY negotiated rather than what was asked
+     * for. CAM_FRAMESIZE requests FRAMESIZE_HD, but the frames that reach the
+     * stream are 640x480, and the requested framesize enum on its own cannot
+     * distinguish "clamped by the driver" from "clamped by a different sensor"
+     * from "clamped by JPEG mode". One live frame buffer settles all three.
+     * See the decode-scale coupling note above: at 640x480 the 1/8 decode
+     * yields 80x60 and the 160x160 model input is a 2x upscale. */
+    ESP_LOGI(TAG, "sensor PID=0x%04x VER=0x%04x, driver framesize enum=%u "
+                  "(requested %u)",
+             (unsigned)s->id.PID, (unsigned)s->id.VER,
+             (unsigned)s->status.framesize, (unsigned)cfg.frame_size);
+
+    camera_fb_t *probe = esp_camera_fb_get();
+    if (probe) {
+        ESP_LOGI(TAG, "first frame %ux%u, %u bytes (format %u)",
+                 (unsigned)probe->width, (unsigned)probe->height,
+                 (unsigned)probe->len, (unsigned)probe->format);
+        if (probe->width != EXPECTED_WIDTH || probe->height != EXPECTED_HEIGHT) {
+            ESP_LOGW(TAG, "sensor delivered %ux%u but CAM_FRAMESIZE implies %ux%u",
+                     (unsigned)probe->width, (unsigned)probe->height,
+                     (unsigned)EXPECTED_WIDTH, (unsigned)EXPECTED_HEIGHT);
+        }
+        esp_camera_fb_return(probe);
+    } else {
+        ESP_LOGE(TAG, "no frame available right after init");
+    }
 
     ESP_LOGI(TAG, "Camera ready (OV3660 class sensor, JPEG)");
     return ESP_OK;
