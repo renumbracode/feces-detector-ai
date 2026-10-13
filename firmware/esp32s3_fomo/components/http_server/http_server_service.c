@@ -74,7 +74,24 @@ static volatile int64_t s_stream_window_ms = 0;
  * leave headroom for every other endpoint on the same TCP path. */
 static volatile uint32_t s_stream_bytes = 0;
 static volatile uint32_t s_stream_bps = 0;
-#define STREAM_BUDGET_BPS 61440u  /* 60 KB/s: leaves room for /status and /spray */
+/* 120 KB/s. This was 61440 (60 KB/s), which sized itself against a frame the
+ * sensor never actually produced: at 1280x720 and jpeg_quality 30 a frame
+ * measured 25,753 bytes, so 60 KB/s capped the live view at 61440/25753 =
+ * ~2.4 fps and the pacer sat pinned against its ceiling on a healthy link
+ * (measured 2.0-2.25 fps). The budget, not the Wi-Fi, was the binding
+ * constraint.
+ *
+ * The frame size has since dropped to ~10 KB via FRAMESIZE_VGA, so at the old
+ * 60 KB/s budget the cap would be ~6 fps -- and that would leave headroom
+ * unused. 120 KB/s allows ~12 fps, with the adaptive interval above (and the
+ * link itself) determining the real rate.
+ *
+ * This is a ceiling on OFFERED load, not a promise of throughput: the pacer
+ * still starts at STREAM_INTERVAL_MIN_MS and only slows when send_ms or the
+ * byte rate say the link is struggling. Raising it risks starving /status and
+ * /spray on the same TCP path, which is a failure mode this file has hit
+ * before -- verify both stay responsive while streaming. */
+#define STREAM_BUDGET_BPS 122880u  /* 120 KB/s: leaves room for /status and /spray */
 #define STREAM_BPS_STEP    4096u
 
 /* Adaptive stream pacing. Owned by the stream task only (it is reset per

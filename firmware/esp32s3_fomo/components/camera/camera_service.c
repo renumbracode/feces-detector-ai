@@ -29,20 +29,34 @@ static const char *TAG = "camera_svc";
 #define CAM_PIN_PCLK    13
 
 #define CAM_XCLK_FREQ_HZ 20000000
-/* 1280x720, and this must stay compatible with the 1/8 JPEG decode scale in
+/* 640x480, and this must stay compatible with the 1/4 JPEG decode scale in
  * inference_service.c (prv_decode_jpeg). Those two are coupled:
  *
- *   1280x720 --esp_jpeg 1/8--> 160x90 --resize--> 160x160 tensor  (~1:1)
- *    640x480 --esp_jpeg 1/8-->  80x60 --resize--> 160x160 tensor  (2x UPSCALE)
+ *    640x480 --esp_jpeg 1/4--> 160x120 --resize--> 160x160 tensor  (1.33x vertical)
+ *   1280x720 --esp_jpeg 1/4--> 320x180 --resize--> 160x160 tensor  (0.5x downscale)
+ *    640x480 --esp_jpeg 1/8-->  80x60 --resize--> 160x160 tensor  (2x UPSCALE, wrong)
  *
- * At 640x480 the decoder produced 80x60, so the 160x160 FOMO input was a 2x
- * nearest-neighbour upscale of a heavily downscaled frame. Source pixels fell
- * from 14400 to 4800 -- exactly 3x (2x horizontal, 1.5x vertical) -- and
- * detection degraded until real feces scored too low to act on. Do not drop
- * the frame size without changing the decode scale (or the model's input size)
- * in the same commit -- the two numbers have to multiply out to roughly the
- * model's input width. */
-#define CAM_FRAMESIZE    FRAMESIZE_HD   /* 1280x720 */
+ * This used to be FRAMESIZE_HD (1280x720) at a 1/8 decode, giving 160x90 --
+ * 14,400 source pixels for a 160x160 model input. The earlier comment here
+ * warned against dropping to VGA, on the grounds that VGA plus the 1/8 scale
+ * would yield 80x60 and a 2x upscale. That warning was correct about the
+ * coupling but was read as "never drop the resolution", and the two were never
+ * changed together. They are now: VGA with a 1/4 decode gives 160x120, i.e.
+ * 19,200 source pixels -- MORE than the 160x90 it replaces, and with no
+ * upscaling in x at all. Detection input gets better while the frame gets
+ * ~2.5x smaller.
+ *
+ * The smaller frame is what makes the live view usable. At 1280x720 and
+ * jpeg_quality 30 a frame measured 25,753 bytes (verified by parsing the SOF
+ * marker of a live /stream capture, not by reading the comment that claimed
+ * 10-15 KB). Against the 60 KB/s stream budget in http_server_service.c that
+ * capped the live view at ~2.4 fps no matter how healthy the link was.
+ *
+ * KEEP THE DIVISOR AND THE DECODE ENUM IN STEP. prv_decode_jpeg derives
+ * outbuf_size from the same constant it passes as out_scale; if they disagree
+ * esp_jpeg_decode returns ESP_ERR_INVALID_ARG and classify() yields no
+ * detection at all, with no error surfaced to /status. */
+#define CAM_FRAMESIZE    FRAMESIZE_VGA   /* 640x480 */
 
 /* jpeg_quality 0-63, and LOWER means higher quality on OV-series sensors.
  *
@@ -51,19 +65,25 @@ static const char *TAG = "camera_svc";
  * ~6 KB/s) a 48 KB frame takes ~8 s to send, so the live view ran at 0.09 fps
  * and /status timed out behind the saturated socket.
  *
- * 30 keeps the sensor at full 1280x720 for detection while cutting frame size
- * to roughly 10-15 KB. Nothing downstream needs more: FOMO consumes a 160x160
- * thumbnail, so detection accuracy is untouched. Resolution is worth
- * protecting; JPEG fidelity on a pen floor is not. If the stream ever needs to
- * be richer, raise this toward 20 -- do NOT go back toward 12.
+ * Unchanged at 30 through the 2026-10-13 VGA change: the frame size drop came
+ * from resolution, not from quality, so image fidelity per pixel is unchanged
+ * and there is no reason to trade more JPEG artifacts for bytes we no longer
+ * need. Measured at 640x480: ~10 KB/frame.
+ *
+ * The earlier "roughly 10-15 KB" claim in this comment was written for
+ * 1280x720 and was wrong by ~2x -- a live capture measured 25,753 bytes at
+ * 1280x720 with this same quality of 30. That misestimate is what left the
+ * live view pinned at ~2 fps, because the 60 KB/s budget was sized against a
+ * frame size the sensor never produced. Resolution is now the frame-size
+ * lever; do NOT go back toward quality 12.
  */
 #define CAM_JPEG_QUALITY 30
 
 /* What CAM_FRAMESIZE is supposed to produce. Only used to warn at boot when the
  * sensor negotiates something else, so a resolution surprise is visible in the
  * boot log instead of silently degrading the model input. */
-#define EXPECTED_WIDTH  1280
-#define EXPECTED_HEIGHT 720
+#define EXPECTED_WIDTH  640
+#define EXPECTED_HEIGHT 480
 
 static volatile bool s_streaming = false;
 static volatile int s_streaming_refs = 0;
@@ -117,12 +137,16 @@ esp_err_t camera_service_init(void)
     s->set_quality(s, CAM_JPEG_QUALITY);
 
     /* Report what the sensor ACTUALLY negotiated rather than what was asked
-     * for. CAM_FRAMESIZE requests FRAMESIZE_HD, but the frames that reach the
-     * stream are 640x480, and the requested framesize enum on its own cannot
-     * distinguish "clamped by the driver" from "clamped by a different sensor"
-     * from "clamped by JPEG mode". One live frame buffer settles all three.
-     * See the decode-scale coupling note above: at 640x480 the 1/8 decode
-     * yields 80x60 and the 160x160 model input is a 2x upscale. */
+     * for. CAM_FRAMESIZE requests the size named at the top of this file, but
+     * the requested framesize enum on its own cannot distinguish "clamped by the
+     * driver" from "clamped by a different sensor" from "clamped by JPEG mode".
+     * One live frame buffer settles all three.
+     *
+     * This matters because the frame size and the decode scale in
+     * inference_service.c are coupled: if the sensor ever clamps below
+     * FRAMESIZE_VGA the 1/4 decode stops yielding ~160 px wide and the model
+     * input silently becomes an upscale. The warning below is the only signal
+     * that this happened. */
     ESP_LOGI(TAG, "sensor PID=0x%04x VER=0x%04x, driver framesize enum=%u "
                   "(requested %u)",
              (unsigned)s->id.PID, (unsigned)s->id.VER,

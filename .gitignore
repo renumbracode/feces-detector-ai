@@ -23,6 +23,12 @@ training/fomo/out_ei/*
 # ESP32-S3 firmware build artifacts
 firmware/esp32s3_fomo/build/
 firmware/esp32s3_fomo/sdkconfig*
+# ...but sdkconfig.defaults is the project's PER-CHECKED-IN defaults and must
+# be tracked: ESP-IDF's own default for the S3 is 160 MHz (see
+# esp32s3/Kconfig.cpu), so without this file a fresh clone silently builds the
+# slow-clock firmware and loses ~1/3 of inference throughput with nothing in the
+# diff to explain it. The generated sdkconfig stays ignored.
+!firmware/esp32s3_fomo/sdkconfig.defaults
 firmware/esp32s3_fomo/managed_components/
 firmware/esp32s3_fomo/dependencies.lock
 firmware/esp32s3_fomo/components/inference/edge_impulse/*
