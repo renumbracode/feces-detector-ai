@@ -18,15 +18,97 @@ the trigger threshold, not the model's score. The real number is in
 `yolo_conf`. Rows with a NULL `yolo_conf` are on-device-only FOMO hits where
 the verifier leg was down.
 
+## Verified working — 2026-10-15 (GlobeAtHome_92CF6)
+
+Board on `192.168.254.50`, static, RSSI **−31 dBm** on ch 5. `GET /status`
+returned `vrf.valid: true`, `verifyOk: true`, `verifyFailures: 0` — so the
+ESP32 → verifier leg on `192.168.254.107:8000` was working on the first try.
+`GET /stream` returned `multipart/x-mixed-replace`, and the dashboard served
+200. Ping averaged 59 ms with 1 of 3 probes lost.
+
 ## Current addresses
 
 | Thing | Value | Notes |
 |-------|-------|-------|
-| ESP32-S3 | `192.168.1.39` | **static**, in NVS (see *Network migration* below) |
-| Laptop (XAMPP + verifier) | `192.168.1.6` | **DHCP — reserved at the router, but expect this to change** |
-| Wi-Fi network | `Meliora` | Windows profile is **Public** |
+| ESP32-S3 | `192.168.254.50` | **static**, in NVS (see *Network migration* below) |
+| Laptop (XAMPP + verifier) | `192.168.254.107` | **DHCP — reserved at the router, but expect this to change** |
+| Wi-Fi network | `GlobeAtHome_92CF6` | Windows profile is **Public** |
 | Verifier | port `8000` | `server/yolo_verify` |
 | Dashboard | port `80` | `/feces-detector-ai/dashboard/` |
+
+> `192.168.254.0/24`, gateway `192.168.254.254`. Note this is **not** the usual
+> `192.168.1.0/24` a home router hands out — GlobeAtHome uses `.254`. Anything
+> hardcoding `192.168.1.x` is stale by assumption, not by accident.
+
+## Network migration — 2026-10-15 (Meliora → GlobeAtHome_92CF6)
+
+Moved to a **GlobeAtHome** router. Two things differ from every previous network
+and both break the §7.5 runbook if you assume otherwise:
+
+- **The LAN is `192.168.254.0/24`, not `192.168.1.0/24`.** Gateway is
+  `192.168.254.254`. The laptop came up on `.107`, so all three of the board's
+  URLs changed.
+- **`Meliora` was out of range entirely** — `netsh wlan show networks` listed
+  only the new SSID, so the board was unreachable *and* its stored SSID could
+  not re-associate. `POST /config` had no path in, so this was the USB NVS
+  rewrite (`setup-guide.md` §7.5, full-config variant) again. Back up first:
+
+  ```bash
+  python -m esptool --chip esp32s3 --port COM4 read_flash 0x9000 nvs_backup.bin 0x6000
+  ```
+
+No firmware change was needed. The AP is **2.4 GHz / WPA2-Personal / ch 5**,
+which satisfies the hardcoded `WIFI_AUTH_WPA2_PSK` in `wifi_service.c`.
+
+### The firewall warning in §7.1 does not always apply
+
+§7.1 step 3 says the Public profile blocks inbound80/8000 and tells you to fix
+it in `wf.msc`. On this machine that was **already handled**: allow rules for
+`Apache HTTP Server` and `python.exe` exist on the **Public** profile. Check
+before editing anything:
+
+```bash
+powershell -Command "Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow \
+  | Where-Object { \$_.DisplayName -match 'Apache|Python' } | Select DisplayName,Profile"
+```
+
+Switching the profile to Private needs elevation and is blocked by policy
+(`Network List Manager Policies`) on this box, so prefer confirming the rules
+exist over trying to change the category.
+
+### Reading the tuning values back before you overwrite them
+
+A NVS rewrite resets every key not in the CSV. Rather than guessing what the
+board was running, dump the partition first:
+
+```bash
+python components/nvs_flash/nvs_partition_tool/nvs_tool.py -d minimal nvs_backup.bin
+```
+
+`threshold` and `srv_trig_conf` print as empty — they are blobs, and `nvs_tool`
+shows no value for them. Read the 4 bytes straight out of the image instead;
+an entry is `[ns:1][type:1][span:1][chunk:1][crc:4][key:16][data:8]`, and the
+blob payload sits in the next `span-1` entry slots:
+
+```bash
+python -c "
+d=open('nvs_backup.bin','rb').read()
+for off in range(0,len(d)-32,4):
+    if d[off+8:off+24].rstrip(b'\x00') in (b'threshold',b'srv_trig_conf'):
+        print(d[off+8:off+24].rstrip(b'\x00').decode(), d[off+32:off+36].hex())"
+# threshold 9a99193f      srv_trig_conf 295c8f3e   -> 0.60 and 0.28
+```
+
+Those values are then re-emitted as `hex2bin` rows. Here they came back at the
+compiled defaults, but they are still worth reading rather than assuming.
+
+### Router-side checks still owed
+
+`192.168.254.50` was confirmed free before flashing (no ARP reply), but the
+**DHCP pool range was not checked** — if the pool includes `.50`, a future lease
+can collide with the board's static address. Also unverified: **AP/client
+isolation**, which would leave detection working while the dashboard's stream
+and status tiles go blank (`session-notes.md`, troubleshooting table).
 
 ## Network migration — 2026-10-13 (ALTHEA 11 → Meliora)
 
