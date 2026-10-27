@@ -1,0 +1,19 @@
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash size -- the partition table in partitions.csv fills the 4 MB exactly.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# The repo's partitions.csv IS the layout (see the camera board's
+# sdkconfig.defaults for the same note). With this off, ESP-IDF's built-in
+# single-app table is used instead and the csv is ignored.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Console over the native USB port (flash + ESP_LOG + monitor on one cable).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+
+# Servo PWM is driven by LEDC at 50 Hz. Two channels (pan, tilt).
+CONFIG_LEDC_TIMER_RESOLUTION=n

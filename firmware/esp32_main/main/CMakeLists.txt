@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS "main.c"
+    PRIV_REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        esp_timer
+        esp_driver_ledc
+        esp_driver_gpio
+        esp_adc
+        freertos
+        esp_system
+        main_config
+        geometry
+        servo_driver
+        water_sensor
+        cleaning_cycle
+        target_server
+)
