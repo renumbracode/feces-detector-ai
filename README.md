@@ -10,8 +10,16 @@ Automated pigpen cleaning with a **hybrid edge + server** architecture and **no 
 - Detected frames are uploaded to a **Python YOLOv8 verification server**
   that re-checks them with a full detection model (unmodified YOLOv8 cannot
   feasibly run on the ESP32-S3).
+- **Multi-instance detection**: one frame can contain several feces spots —
+  every spot above the confidence floor is counted and drawn (live view shows
+  one box per instance; history rows show the count). Spray fires once per
+  frame regardless of instance count. See
+  [docs/scaling-and-multi-camera.md](docs/scaling-and-multi-camera.md).
 - A **CodeIgniter 3 + MySQL** dashboard (XAMPP) logs events, shows the live
   stream, and provides manual override.
+- **Scalable camera count**: one ESP32-S3 per camera; how many cameras a pen
+  needs depends on its size and layout (coverage, blind spots). The dashboard
+  has a `cameras` registry for multi-pen deployments.
 
 ## Objectives
 

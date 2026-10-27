@@ -35,6 +35,15 @@ firmware/esp32s3_fomo/components/inference/edge_impulse/*
 !firmware/esp32s3_fomo/components/inference/edge_impulse/.gitkeep
 !firmware/esp32s3_fomo/components/inference/edge_impulse/README.md
 
+# Main ESP32 (the actuator board) build artifacts -- same rules as the camera
+# board's project above. Without these the build tree (126 MB, 1305 files) and
+# the generated sdkconfig would be committed.
+firmware/esp32_main/build/
+firmware/esp32_main/sdkconfig*
+!firmware/esp32_main/sdkconfig.defaults
+firmware/esp32_main/managed_components/
+firmware/esp32_main/dependencies.lock
+
 # Edge Impulse export archives (unpacked into the gitignored SDK folder)
 *impulse-#1.zip
 
@@ -48,6 +57,11 @@ firmware/esp32s3_fomo/components/inference/edge_impulse/*
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime logs (verifier stdout/stderr, start_verifier.sh writes here).
+# These are runtime state, not source: the verifier's log grows without bound
+# and must never be committed.
+logs/
 
 # Local agent workspace / session plans
 .opencode/
