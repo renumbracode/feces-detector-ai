@@ -6,10 +6,16 @@ uploads detected JPEG frames here. This service re-runs the frames through a
 full Ultralytics YOLOv8 detection model (which cannot feasibly run on the
 MCU) and returns high-confidence verification for logging/analytics.
 
+Multi-instance: every feces box at or above the confidence floor is reported,
+not just the best one -- one frame can hold several feces spots, and the
+instance count is part of the answer (feces_count + boxes_norm).
+
 Endpoints:
   GET  /health               liveness + model info
-  POST /verify               body = raw JPEG, header X-Fomo-Conf = fomo score
-                             -> { ok, uclass, yolo_conf, boxes, width, height }
+  POST /verify               body = raw JPEG, header X-Fomo-Conf = fomo score,
+                             optional X-Camera-Id = camera label
+                             -> { ok, uclass, yolo_conf, feces_count,
+                                  box_norm, boxes_norm, boxes, ... }
 
 Run:
   pip install -r requirements.txt
@@ -57,8 +63,18 @@ def resolve_model_path() -> Path:
 
 MODEL_PATH = resolve_model_path()
 CONF_THRESHOLD = float(os.environ.get("YOLO_CONF", "0.25"))
+# NMS overlap threshold. Ultralytics defaults to 0.7, which let two overlapping
+# detections of ONE blob both survive the server (observed pair at IoU 0.61):
+# the board shipped both and the dashboard was left guessing whether they were
+# the same object. 0.45 collapses duplicates of a single spot while keeping
+# genuinely distinct neighbouring spots as separate boxes.
+NMS_IOU = float(os.environ.get("YOLO_NMS_IOU", "0.45"))
 MAX_IMAGE_SIZE = (416, 416)  # resize long edge toward 416 to keep inference fast
 TARGET_CLASS = os.environ.get("YOLO_TARGET_CLASS", "feces")  # trained model, 2-class
+# Cap on target boxes returned in the compact boxes_norm array. The firmware
+# holds VERIFY_MAX_FECES_BOXES = 4 entries and reads this reply into a fixed
+# buffer, so both sides agree on the same wire cap.
+MAX_TARGET_BOXES = int(os.environ.get("YOLO_MAX_TARGET_BOXES", "4"))
 
 app = FastAPI(title="Feces YOLOv8 Verifier", version="1.0.0")
 
@@ -90,7 +106,7 @@ def _run_yolo(arr):
     device gave up at its own timeout and we logged ClientDisconnect. Off the
     loop, uploads are accepted while inference runs.
     """
-    return get_model().predict(arr, conf=CONF_THRESHOLD, verbose=False)
+    return get_model().predict(arr, conf=CONF_THRESHOLD, iou=NMS_IOU, verbose=False)
 
 
 @app.on_event("startup")
@@ -125,7 +141,8 @@ def health():
 
 
 @app.post("/verify")
-async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
+async def verify(request: Request, x_fomo_conf: float = Header(default=0.0),
+                 x_camera_id: str = Header(default="")):
     try:
         img_bytes = await request.body()
     except ClientDisconnect:
@@ -137,6 +154,11 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
         return JSONResponse({"ok": False, "error": "empty body"}, status_code=400)
 
     fomo_conf = max(0.0, min(1.0, x_fomo_conf))
+    # Multi-camera groundwork: each device can label its uploads. Logged only
+    # for now; the dashboard cameras table maps labels to pens.
+    camera_id = x_camera_id.strip()[:32]
+    if camera_id:
+        print(f"verify: camera={camera_id} bytes={len(img_bytes)}")
 
     try:
         pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -180,33 +202,41 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
     # The detector is 2-class (feces + pig). Only a feces box is a detection,
     # so never let a confident pig box mask a real feces box: report the
     # highest-scoring *feces* box, and carry the best pig score alongside it
-    # so a "no feces" answer can be explained.
+    # so a "no feces" answer can be explained. Multi-instance: EVERY feces
+    # box at or above the floor is counted and returned, not just the best.
     feces_conf = best_per_class.get(TARGET_CLASS, 0.0)
     pig_conf = best_per_class.get("pig", 0.0)
     best_conf = max(best_per_class.values(), default=0.0)
     uclass = TARGET_CLASS if feces_conf > 0 else (
         max(best_per_class, key=best_per_class.get) if best_per_class else "none"
     )
-    triggered = feces_conf >= CONF_THRESHOLD
+    feces_boxes = [b for b in boxes if b["class"] == TARGET_CLASS]
+    feces_boxes.sort(key=lambda b: -b["conf"])
+    feces_count = len(feces_boxes)
+    triggered = feces_count > 0
 
     # Normalized 0..1 geometry for the best target-class box, so a thin client
     # (the ESP32 overlay) can draw it without knowing the frame size. Sent in
     # post-resize coordinates, matching "boxes" above.
-    box_norm = None
-    if best_target_box is not None:
-        bw = max(1, width)
-        bh = max(1, height)
-        nx1 = max(0.0, best_target_box["x1"] / bw)
-        ny1 = max(0.0, best_target_box["y1"] / bh)
-        nx2 = min(1.0, best_target_box["x2"] / bw)
-        ny2 = min(1.0, best_target_box["y2"] / bh)
-        if nx2 > nx1 and ny2 > ny1:
-            box_norm = {
-                "x": round(nx1, 4),
-                "y": round(ny1, 4),
-                "w": round(nx2 - nx1, 4),
-                "h": round(ny2 - ny1, 4),
-            }
+    bw = max(1, width)
+    bh = max(1, height)
+
+    def _norm(b):
+        nx1 = max(0.0, b["x1"] / bw)
+        ny1 = max(0.0, b["y1"] / bh)
+        nx2 = min(1.0, b["x2"] / bw)
+        ny2 = min(1.0, b["y2"] / bh)
+        if nx2 <= nx1 or ny2 <= ny1:
+            return None
+        return {
+            "x": round(nx1, 4),
+            "y": round(ny1, 4),
+            "w": round(nx2 - nx1, 4),
+            "h": round(ny2 - ny1, 4),
+        }
+
+    box_norm = _norm(best_target_box) if best_target_box is not None else None
+    boxes_norm = [n for n in (_norm(b) for b in feces_boxes[:MAX_TARGET_BOXES]) if n]
 
     return {
         # Compact fields first: the ESP32 reads this reply into a small fixed
@@ -214,10 +244,13 @@ async def verify(request: Request, x_fomo_conf: float = Header(default=0.0)):
         "ok": True,
         "yolo_conf": round(feces_conf, 4),
         "detected": triggered,
+        "feces_count": feces_count,
         "box_norm": box_norm,
+        "boxes_norm": boxes_norm,
         "uclass": uclass,
         "fomo_conf": fomo_conf,
         "triggered": triggered,
+        "camera_id": camera_id,
         "best_any_conf": round(best_conf, 4),
         "feces_conf": round(feces_conf, 4),
         "pig_conf": round(pig_conf, 4),
