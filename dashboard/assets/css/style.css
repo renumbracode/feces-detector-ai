@@ -338,7 +338,53 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .live-stage.stage-feces { box-shadow: 0 0 42px 8px rgba(34, 197, 94, 0.55); }
 .live-stage.stage-other { box-shadow: 0 0 42px 8px rgba(244, 63, 94, 0.55); }
 .live-badge { position: absolute; top: 14px; left: 14px; }
-#detect-box {
+/* Graph-paper grid over the live frame. Lines are drawn with CSS gradients
+ * sized in %, so the grid matches the displayed image at any stream size
+ * and needs no DOM per line. Detection boxes (z-index 2) sit on top. */
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image:
+    linear-gradient(to right,  rgba(148, 163, 184, 0.30) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.30) 1px, transparent 1px),
+    linear-gradient(to right,  transparent calc(50% - 1px), rgba(203, 213, 225, 0.6) 50%, transparent calc(50% + 1px)),
+    linear-gradient(to bottom, transparent calc(50% - 1px), rgba(203, 213, 225, 0.6) 50%, transparent calc(50% + 1px));
+  background-size: 10% 10%, 10% 10%, 100% 100%, 100% 100%;
+}
+/* Axis tick numbers (0..100), positioned by JS at % offsets of the stage. */
+.axis-labels { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.axis-labels span {
+  position: absolute;
+  font: 700 9px/1 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.72);
+  padding: 1px 3px;
+  border-radius: 3px;
+}
+.axis-x span { top: 0; transform: translateX(-50%); }
+.axis-y span { left: 0; transform: translateY(-50%); }
+/* Corner HUD with the primary box's live coordinates. */
+#coord-readout {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  font: 700 10px/1 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  letter-spacing: 0.04em;
+  color: #e2e8f0;
+  background: rgba(2, 6, 23, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 4px;
+  padding: 5px 8px;
+  pointer-events: none;
+}
+/* .detect-box: one overlay per feces instance (multi-instance detection).
+ * #detect-box stays the primary/labelled box so old markup keeps working. */
+#detect-box,
+.detect-box {
   position: absolute;
   border: 2px solid #94a3b8;
   border-radius: 4px;
@@ -348,10 +394,28 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
   transition: left 0.15s, top 0.15s, width 0.15s, height 0.15s, opacity 0.15s, border-color 0.15s, box-shadow 0.15s;
   z-index: 2;
 }
-#detect-box.on { opacity: 1; }
-#detect-box.feces { border-color: #22c55e; box-shadow: 0 0 0 1px rgba(0,0,0,0.55), 0 0 18px rgba(34, 197, 94, 0.9); }
-#detect-box.other { border-color: #f43f5e; box-shadow: 0 0 0 1px rgba(0,0,0,0.55), 0 0 18px rgba(244, 63, 94, 0.9); }
-#detect-label {
+#detect-box.on,
+.detect-box.on { opacity: 1; }
+#detect-box.feces,
+.detect-box.feces { border-color: #22c55e; box-shadow: 0 0 0 1px rgba(0,0,0,0.55), 0 0 18px rgba(34, 197, 94, 0.9); }
+#detect-box.other,
+.detect-box.other { border-color: #f43f5e; box-shadow: 0 0 0 1px rgba(0,0,0,0.55), 0 0 18px rgba(244, 63, 94, 0.9); }
+/* No-contact state: nothing detected anywhere in the frame. This is a "scanner
+ * idle" outline, not a claim about where a feces is -- dashed, no
+ * glow, see-through. Every solid green/red box now sits on a real detection.
+ * Red palette (same as the solid .other state) because the whole system's
+ * color language is green=feces / red=no feces; dashed keeps it distinguishable
+ * from a real red detection. */
+#detect-box.no-contact,
+.detect-box.no-contact {
+  border-style: dashed;
+  border-color: #f43f5e;
+  box-shadow: 0 0 14px rgba(244, 63, 94, 0.45);
+  opacity: 0.7;
+}
+#detect-box.no-contact #detect-label { background: #e11d48; }
+#detect-label,
+.detect-box .detect-label {
   position: absolute;
   top: -27px;
   left: -2px;
@@ -364,8 +428,10 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
   background: #f43f5e;
   line-height: 1;
 }
-#detect-box.feces #detect-label { background: #15803d; }
-#detect-box.other #detect-label { background: #e11d48; }
+#detect-box.feces #detect-label,
+.detect-box.feces .detect-label { background: #15803d; }
+#detect-box.other #detect-label,
+.detect-box.other .detect-label { background: #e11d48; }
 .conn-banner {
   display: flex; align-items: center; gap: 10px;
   background: var(--danger-soft);
@@ -375,6 +441,38 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
   font-weight: 600;
 }
 .conn-banner[hidden] { display: none; }
+/* Live-panel header badge: unmistakable while the pump switch is off. */
+#spray-off-badge { background: var(--danger); color: #fff; }
+#spray-off-badge[hidden] { display: none; }
+
+/* ---- dispatch panel (camera board -> external actuator board) ----
+   Sits under the live view. The state chip carries the outcome; the body
+   line says WHY, in words, because "REFUSED" on its own does not tell the
+   operator whether to fill the tank or wait for the cycle to finish. */
+.target-panel {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+.target-panel[hidden] { display: none; }
+.target-panel-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 6px;
+}
+.target-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.target-panel-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
 
 /* ---- pills / pager ---- */
 .filter-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }

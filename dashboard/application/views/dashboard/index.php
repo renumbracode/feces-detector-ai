@@ -97,7 +97,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
         <div class="table-wrap">
           <table class="table">
             <thead>
-              <tr><th>#</th><th>Time</th><th>Confidence</th><th>Triggered</th><th>Spray (ms)</th><th>Source</th><th>Model</th><th>Verified</th><th>Notes</th></tr>
+              <tr><th>#</th><th>Time</th><th>Confidence</th><th>Instances</th><th>Triggered</th><th>Spray (ms)</th><th>Source</th><th>Model</th><th>Verified</th><th>Notes</th></tr>
             </thead>
             <tbody id="recent-tbody">
               <?php foreach ($recent as $r): ?>
@@ -119,7 +119,7 @@ defined('BASEPATH') OR exit('No direct script access allowed');
               </tr>
               <?php endforeach; ?>
               <?php if (!$recent): ?>
-              <tr><td colspan="9" class="empty">No detections yet — waiting for the device.</td></tr>
+              <tr><td colspan="10" class="empty">No detections yet — waiting for the device.</td></tr>
               <?php endif; ?>
             </tbody>
           </table>

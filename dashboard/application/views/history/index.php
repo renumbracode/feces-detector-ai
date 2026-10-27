@@ -22,7 +22,7 @@ $qs = function ($over) use ($filter) {
     <div class="table-wrap">
       <table class="table">
         <thead>
-          <tr><th>#</th><th>Time</th><th>Confidence</th><th>Triggered</th><th>Spray (ms)</th><th>Source</th><th>Model</th><th>Verified</th><th>Notes</th></tr>
+          <tr><th>#</th><th>Time</th><th>Confidence</th><th>Instances</th><th>Location</th><th>Triggered</th><th>Spray (ms)</th><th>Source</th><th>Model</th><th>Verified</th><th>Notes</th></tr>
         </thead>
         <tbody>
           <?php foreach ($rows as $r): ?>
@@ -35,6 +35,16 @@ $qs = function ($over) use ($filter) {
                 <span class="conf-bar"><i style="width:<?= (int) round((float) $r['confidence'] * 100) ?>%"></i></span>
               </div>
             </td>
+            <?php $ic = max(1, (int) ($r['instance_count'] ?? 1)); ?>
+            <td><?php if ($ic > 1): ?><span class="chip chip-verified">&times;<?= $ic ?></span><?php else: ?><span class="muted">1</span><?php endif; ?></td>
+            <?php /* Primary feces box in stream pixels (X,Y = top-left corner).
+                   * The multiplier pair follows the live stream's VGA 640x480;
+                   * the title carries the normalized 0..1 wire values and the
+                   * box size so nothing is lost from the old percent display. */ ?>
+            <td><?php if (isset($r['x']) && $r['x'] !== null && $r['x'] !== ''): ?>
+              <?php $fx = (float) $r['x']; $fy = (float) $r['y']; $fw = (float) $r['w']; $fh = (float) $r['h']; ?>
+              <span class="num" title="x <?= $fx ?>, y <?= $fy ?> normalized · <?= (int) round($fw * 640) ?>×<?= (int) round($fh * 480) ?> px">X <?= (int) round($fx * 640) ?> · Y <?= (int) round($fy * 480) ?></span>
+            <?php else: ?><span class="muted">—</span><?php endif; ?></td>
             <td><span class="badge <?= $r['triggered'] ? 'badge-yes' : 'badge-no' ?>"><?= $r['triggered'] ? 'Yes' : 'No' ?></span></td>
             <td class="num"><?= (int) $r['spray_duration'] ?></td>
             <td><span class="chip"><?= htmlspecialchars($r['source_ip'] ?? '') ?></span></td>
@@ -44,7 +54,7 @@ $qs = function ($over) use ($filter) {
           </tr>
           <?php endforeach; ?>
           <?php if (!$rows): ?>
-          <tr><td colspan="9" class="empty">No records match this filter.</td></tr>
+          <tr><td colspan="11" class="empty">No records match this filter.</td></tr>
           <?php endif; ?>
         </tbody>
       </table>

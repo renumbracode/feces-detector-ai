@@ -109,13 +109,15 @@
     }
     /* Which detector is currently responsible for a detection, matching what the
      * firmware actually ORs. Without this the panel cannot tell a device hit
-     * from a server hit. */
+     * from a server hit. Multi-instance: the count is how many feces spots are
+     * in the frame, not just whether one is. */
     {
       const sig = fecesSignal(j);
       if (sig.detected) {
         const label = sig.source === 'both' ? 'FOMO+YOLO'
                     : (sig.source === 'server' ? 'via YOLOv8 server' : 'via FOMO device');
-        parts.push('<span class="chip chip-verified">Detected ' + esc(label) + '</span>');
+        const count = sig.instanceCount > 1 ? ' ×' + sig.instanceCount : '';
+        parts.push('<span class="chip chip-verified">Detected' + count + ' ' + esc(label) + '</span>');
       }
     }
     if (typeof j.fps === 'number' && j.fps > 0) {
@@ -137,11 +139,21 @@
    * disagreeing about the same frame.
    *
    * A verifier answer is only trusted while it is fresh. The device polls the
-   * verifier every 2 s and reports how old the answer is in vrf.ageMs, so an
-   * answer older than this means the verifier stopped answering (crashed, PC
-   * asleep, network down) rather than the pen actually being clean. Without
-   * this the last "no feces" would stay on screen indefinitely. */
-  const VRF_STALE_MS = 6000;
+   * verifier and reports how old the answer is in vrf.ageMs, so an answer
+   * older than this means the verifier stopped answering (crashed, PC asleep,
+   * network down) rather than the pen actually being clean. Without this the
+   * last "no feces" would stay on screen indefinitely.
+   *
+   * 15000 is not arbitrary: it is VERIFY_STALL_MS in the firmware
+   * (components/detection_service/detection_service.c), the age at which the
+   * DEVICE itself declares the poll leg stalled and forces an attempt. The
+   * dashboard used to be stricter than the device, at 6000, and the board's
+   * real poll cycle is ~3.4 s -- so a single hiccuped poll (5 s client
+   * timeout plus a 4 s backoff) pushed ageMs past 6 s and the overlay cried
+   * "VERIFY OFFLINE" while the server was answering in 0.4 s. Matching the
+   * firmware's own threshold keeps the two in agreement, so the panel only
+   * says "offline" when the device agrees that the leg is stalled. */
+  const VRF_STALE_MS = 15000;
 
   function fecesSignal(j) {
     j = j || {};
@@ -172,9 +184,58 @@
                             : (deviceDetected ? 'fomo' : 'server'))
                           : 'none';
 
-    /* Draw the box from whichever source produced the detection, preferring the
-     * device since its box is the one the on-device path used. */
-    const boxData = deviceDetected ? j.box : (serverDetected ? v : null);
+    /* Multi-instance: prefer the box arrays the new firmware/server send
+     * (j.boxes for FOMO, v.boxes for YOLOv8, each score-descending). Older
+     * single-box payloads fall back to the legacy j.box / v.x..h fields.
+     * An array that EXISTS but is empty means "detected, no location" -- the
+     * new firmware used to fabricate a centred 0.3/0.3/0.4/0.4 square in its
+     * legacy fields, and trusting it here rendered a green box stuck dead
+     * centre. Only a missing key (old firmware) may use the legacy fallback. */
+    const asBoxList = (arr, legacy) => {
+      if (Array.isArray(arr)) {
+        return arr.filter((b) => b && Number(b.w) > 0.001 && Number(b.h) > 0.001);
+      }
+      return legacy ? [legacy] : [];
+    };
+    const deviceBoxes = asBoxList(j.boxes, j.box);
+    const serverBoxes = vrfFresh ? asBoxList(v.boxes,
+        (Number(v.w) > 0.001 || Number(v.h) > 0.001) ? v : null) : [];
+
+    /* Union of both detectors' boxes, so every distinct spot gets its own
+     * overlay wherever either model saw it. The old device-preferred pick let
+     * YOLOv8-only spots go unboxed (FOMO sits below its threshold while the
+     * server fires). Boxes overlapping at IoU >= 0.15 are the same physical
+     * object seen twice -- keep the higher score, drop the dupe. The threshold
+     * used to be 0.30, which also ate genuinely distinct spots a few percent
+     * apart; the server's NMS now collapses same-blob duplicates upstream, so
+     * the dashboard can afford to be permissive and let close neighbours each
+     * keep their own box. Entries carry
+     * their own conf when the wire provides one; otherwise they inherit the
+     * source's headline confidence. */
+    const iou = (a, b) => {
+      const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      const inter = ix * iy;
+      const uni = a.w * a.h + b.w * b.h - inter;
+      return uni > 0 ? inter / uni : 0;
+    };
+    const tag = (arr, conf) => arr.map((b) => ({
+      x: b.x, y: b.y, w: b.w, h: b.h, s: Number(b.conf) || conf || 0
+    })).sort((a, b) => b.s - a.s);
+    const merged = tag(deviceBoxes, deviceConf);
+    tag(serverBoxes, serverConf).forEach((b) => {
+      if (!merged.some((m) => iou(m, b) >= 0.15)) merged.push(b);
+    });
+    merged.sort((a, b) => b.s - a.s);
+    const boxes = merged.slice(0, 8);
+    const boxData = boxes.length ? boxes[0] : null;
+
+    /* How many feces spots are in the frame right now: the deduped union when
+     * geometry exists, else the reported counts (max of the two detectors, so
+     * one optimistic source is enough to raise the count). */
+    const deviceCount = deviceDetected ? (Number(j.fecesCount) || deviceBoxes.length || 1) : 0;
+    const serverCount = serverDetected ? (Number(v.fecesCount) || serverBoxes.length || 1) : 0;
+    const instanceCount = boxes.length ? boxes.length : Math.max(deviceCount, serverCount);
 
     return {
       detected: detected,
@@ -192,6 +253,8 @@
       useVrf: serverDetected && !deviceDetected,
       vrfStale: vrfStale,
       boxData: boxData,
+      boxes: boxes,
+      instanceCount: instanceCount,
     };
   }
 
@@ -395,11 +458,16 @@
     const verified = r.verified
       ? '<span class="chip chip-verified">✓ ' + (Number(r.yolo_conf) || 0).toFixed(2) + '</span>'
       : '<span class="muted">—</span>';
+    const count = Math.max(1, Number(r.instance_count) || 1);
+    const countCell = count > 1
+      ? '<span class="chip chip-verified">×' + count + '</span>'
+      : '<span class="muted">1</span>';
     return '<tr>' +
       '<td class="num">' + r.id + '</td>' +
       '<td>' + esc(r.event_time || '') + '</td>' +
       '<td><div class="conf"><span class="conf-text">' + conf.toFixed(2) +
       '</span><span class="conf-bar"><i style="width:' + pct + '%"></i></span></div></td>' +
+      '<td>' + countCell + '</td>' +
       '<td><span class="badge ' + badge + '">' + trig + '</span></td>' +
       '<td class="num">' + (Number(r.spray_duration) || 0) + '</td>' +
       '<td><span class="chip">' + esc(r.source_ip || '') + '</span></td>' +
@@ -425,7 +493,7 @@
           if (Array.isArray(j.recent) && j.recent.length) {
             tb.innerHTML = j.recent.map(confRow).join('');
           } else {
-            tb.innerHTML = '<tr><td colspan="9" class="empty">No detections yet.</td></tr>';
+            tb.innerHTML = '<tr><td colspan="10" class="empty">No detections yet.</td></tr>';
           }
         }
       } catch (e) { /* keep last view */ }
