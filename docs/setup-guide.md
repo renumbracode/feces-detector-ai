@@ -266,8 +266,11 @@ The recovery is to rewrite the NVS partition directly over USB. This needs no
 source change and no rebuild — only the `nvs` partition is rewritten, leaving
 the app untouched.
 
-The `nvs` partition lives at **0x9000**, size **0x6000** (`partitions.csv`).
-Write a CSV **outside the repo** so the password is never committed:
+The `nvs` partition lives at **0x9000**, size **0x6000**. (That address comes
+from ESP-IDF's built-in single-app partition table, **not** from the repo's
+`partitions.csv` — see the note in `sdkconfig.defaults`. The `storage` fat
+partition listed in that csv does not exist on the board.) Write a CSV
+**outside the repo** so the password is never committed:
 
 ```
 key,type,encoding,value
@@ -360,6 +363,160 @@ before the rewrite.
 - **Credentials cannot be read back.** `GET /config` omits `wifi_ssid`/`wifi_pass`,
   so the only record of the network a board is on is whatever you wrote down.
 
+## 8. Two-board setup (camera board + actuator board)
+
+The system runs as **two ESP32 boards on the same Wi-Fi**:
+
+| Board | Firmware | Role |
+|---|---|---|
+| Camera ESP32-S3 | `firmware/esp32s3_fomo` | camera, FOMO detection, YOLOv8 verify poll, **publishes coordinates**, its own legacy local spray path |
+| Main ESP32 (actuator) | `firmware/esp32_main` | 2 servos, pump relay, water-level sensor, coordinate→angle conversion, the cleaning cycle |
+
+The camera board detects and publishes; the main board decides whether it can
+act. The wire contract is `docs/target-protocol.md`; the main board's pins
+are in `docs/wiring-guide.md`.
+
+### 8.1 Build and flash the main board
+
+```bash
+scripts\esp_idf_build_main.cmd build
+scripts\esp_idf_build_main.cmd -p COMx flash
+scripts\esp_idf_build_main.cmd -p COMx monitor
+```
+
+The main board's HTTP server listens on **8080**.
+
+### 8.2 Give the main board its Wi-Fi and its calibration
+
+Over USB (the board has no stored credentials yet, so it cannot be reached
+over HTTP):
+
+```
+http://<main-board-ip>:8080/setup
+```
+
+Set the Wi-Fi SSID/password of the **same network the camera board is on**,
+then the calibration:
+
+- `cam_x`, `cam_y` — the camera's position on the pen floor, in mm
+- `cam_height` — how high the camera is above the floor
+- `cam_pitch` — how far below horizontal it looks
+- `cam_yaw` — 0 when the camera looks toward +Y
+- `focal_px` — the focal length in pixels, or derive it from the field of view
+- `nozzle_x`, `nozzle_y`, `nozzle_h` — the nozzle mount
+- `pan_min/max`, `tilt_min/max` — the servo's **mechanical** travel
+- `water_min` — the level below which cleaning is refused
+
+The page says so too; it is the same list.
+
+### 8.3 Check the geometry before anything moves
+
+```bash
+curl http://<main-board-ip>:8080/selftest
+```
+
+`{"ok":true,"passed":N,"failed":0}` means the solver itself is correct. If it
+fails, the numbers in the calibration are not the problem — the maths is, and
+the message says which check failed. This is the first thing to run when the
+nozzle aims somewhere unexpected: it separates "the maths is wrong" from "the
+measured numbers are wrong".
+
+### 8.4 Point the camera board at the main board
+
+From the dashboard: **Control → Actuator board (main ESP32)**, enter the URL
+and switch publishing on. That is applied to the camera board **immediately,
+with no reboot**.
+
+Or by hand:
+
+```bash
+curl "http://<camera-board-ip>/target?url=http://<main-ip>:8080/target&enable=1"
+```
+
+### 8.5 Switch the camera board's own pump OFF
+
+**This is not optional.** The camera board keeps its own relay and its own
+local spray path (it is left unchanged so it can be reused for something
+else). While the main board is also connected, both would spray for one
+detection.
+
+```bash
+curl -X POST http://<camera-board-ip>/config -d 'spray_enabled=0'
+```
+
+The camera board then still detects, still alerts, still logs and still
+publishes — it just refuses to energise its own relay. The same switch is on
+the Control page and on the board's `/setup` page.
+
+### 8.6 The staged test procedure
+
+Work through these in order. **Do not connect the water until step 5.**
+
+**Stage 1 — coordinates only, nothing moves.**
+The main board must log the received message. With publishing on and the
+camera board pointed at it, the main board's serial log should show
+`detection N -> accepted ...` or a refusal reason. If nothing arrives, the
+two boards are not on the same network, or the URL is wrong.
+
+```bash
+curl http://<main-board-ip>:8080/status
+```
+
+**Stage 2 — servo positioning, pump still disabled.**
+Move the nozzle by hand and watch it. The main board's `/servo` endpoint
+**never touches the pump** — that separation is the point:
+
+```bash
+curl "http://<main-board-ip>:8080/servo?pan=0&tilt=30"
+```
+
+Then check the geometry against a target placed at a **known floor
+position**: put something on the floor at a measured spot, make the camera
+see it, and confirm the nozzle aims there. This is where a wrong `cam_pitch`
+or a wrong `focal_px` shows up. Fix the calibration and repeat until it
+lands right.
+
+**Stage 3 — the relay alone, no water.**
+With the pump's water disconnected:
+
+```bash
+curl "http://<main-board-ip>:8080/pump?duration=1000"
+```
+
+The relay should click for one second and the pump should turn. **Watch for
+a reset during the spray** — that is the brownout symptom of the pump
+sharing the board's supply, not a firmware bug.
+
+**Stage 4 — the pump alone, with water.**
+Short runs, and confirm the low-water protection. Empty the tank (or set
+`water_min` above the current level) and check that the pump is **refused**
+with `low_water`, not merely that it runs briefly:
+
+```bash
+curl "http://<main-board-ip>:8080/pump?duration=1000"
+```
+
+**Stage 5 — the complete cleaning cycle.**
+Both boards connected, the camera board's own pump off, water present. Show
+feces to the camera and watch the whole chain: detection → coordinates
+published → angles computed → nozzle aimed → pump runs → cooldown. The live
+view's *Actuator board* panel shows the outcome of the last dispatch, and
+says **why** if it was refused.
+
+### 8.7 If the nozzle aims the wrong way
+
+In order, because the causes are easy to confuse:
+
+1. `GET /selftest` on the main board — is the solver itself right?
+2. Is the yaw convention right? A **positive** yaw turns the camera's +Y
+   direction toward **−X** (right-hand rule about +Z). The nozzle's pan is
+   the other way round: pan 0 aims at +Y, positive pan aims at +X.
+3. Is the pitch sign right? `cam_pitch` is positive when the camera looks
+   **down**.
+4. Is `cam_height` the height above the **pen floor**, not above the
+   nozzle?
+5. Is `focal_px` right? A quick check: `focal_px = frame_width / (2 × tan(hfov/2))`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |
@@ -368,6 +525,8 @@ before the rewrite.
 | Dashboard "Device unreachable" | Wrong `esp32_ip`/`esp32_port`, or ESP32 + PC on different LAN |
 | Ping/`/status` time out but ESP is online | **Router wireless/client (L2) isolation** blocks station↔station. Fix: connect the PC to the router via **Ethernet**, or disable "AP/client isolation" in the router admin at `http://192.168.1.1` (Wireless → Advanced/Professional → Isolate). The ESP can still POST to the server; only PC→ESP pull is blocked |
 | Need to change Wi-Fi/URLs | Open `http://<esp-ip>/setup` (no reflash), save, board reboots into the new network |
+| `cam_hal: FB-OVF` in the serial log | **Normal — do not chase it.** The camera overruns because the detect loop consumes a frame every ~3.4 s. Measured at 8 occurrences in 70 s with the verifier perfectly healthy. See `docs/wiring-guide.md` |
+| Verifier down and the board's detection goes sluggish | The verify poll runs inline in the detect loop, so a dead server blocks it. The firmware now fails a known-dead server in 2 s instead of 5 s; the underlying fix (moving the poll to its own task) is still open — see *Open issues* in `docs/session-notes.md` |
 | ESP32 never appears on the phone hotspot | Hotspot is on 5 GHz — the ESP32-S3 is 2.4 GHz only. Also check the hotspot is not WPA3-only (`wifi_service.c` hardcodes `WIFI_AUTH_WPA2_PSK`) |
 | Laptop and ESP32 both on the hotspot, but `/status` from the laptop times out | Windows Firewall on the **Public** profile blocking port 80 — see §7.1 step 3 |
 | Dashboard loads locally but the ESP32 logs "Dashboard log failed" | Laptop's hotspot IP in `dash_url` is wrong, or Apache is not listening on the hotspot interface (§7.1 steps 3-4) |
@@ -376,4 +535,9 @@ before the rewrite.
 | CI3 `system folder path` error | Drop the CodeIgniter 3 `system/` dir into `dashboard/` |
 | Database "table not found" | Run `dashboard/database.sql` import |
 | Sprays nonstop | Threshold too low; raise it on the device |
-| Doesn't build | Install ESP-IDF v5.x, run `idf.py set-target esp32s3` |
+| Main board gets no coordinates | The two boards are on different networks, or `target_url` is wrong. Check `GET /status` on the camera board: `target.published` counts what it sent and `target.failures` counts what did not arrive |
+| Camera board sprays AND the main board sprays | The camera board's own pump is still on. `POST /config -d 'spray_enabled=0'` on the camera board (see §8.5) |
+| Nozzle aims the wrong way | Work through §8.7 in order — `GET /selftest` first |
+| Pump refused with `low_water` | Working as intended. Check `water_min` and the sensor's raw value in `GET /status` |
+| Pump runs but nothing comes out | The pump's supply is separate and its own; check the hose and the relay's `NO` contact |
+| Does not build | Install ESP-IDF v5.x, run `idf.py set-target esp32s3` |

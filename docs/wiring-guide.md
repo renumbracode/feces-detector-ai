@@ -217,3 +217,111 @@ addressable RGB LED that needs a NeoPixel/RMT bitstream rather than a plain GPIO
 
 If you ever need another alarm output, do not reuse 1, 14 or 21 -- and never share a
 pin with the buzzer.
+
+---
+
+## The `cam_hal: FB-OVF` messages are normal — do not chase them
+
+The serial log shows `cam_hal: FB-OVF` (camera frame buffer overflow) every
+few seconds. **This is normal for this design and is not a fault.**
+
+The camera produces frames continuously at about 25 fps, but the detection
+loop consumes **one frame every ~3.4 s**: ~720 ms of on-device FOMO inference
+plus a verifier poll that costs several hundred more milliseconds. The
+camera driver cannot hold that backlog, so its buffer overruns and it drops
+frames. The frames that are delivered are still good, and detection keeps
+working.
+
+Measured on 2026-10-28 with the verifier perfectly healthy (poll round
+trips of 474–897 ms, every poll succeeding), `FB-OVF` appeared **8 times in
+70 seconds**. It is a symptom of the loop being paced by inference, not of
+anything being broken.
+
+Two things make it worse, both understood:
+
+- **The verifier being unreachable.** The poll runs inline in the detection
+  loop, so a 5 s connect timeout blocks the whole loop. The firmware now
+  drops that timeout to 2 s once a poll has failed (`s_verify_ok` false),
+  which is why a PC outage costs the loop ~2 s per attempt instead of ~5 s.
+  A healthy server always gets the full 5 s, so a slow-but-working server
+  is never cut off.
+- **The camera overrun itself**, which is inherent to the 3.4 s cadence.
+
+If you see `FB-OVF` alongside `ei_invoke: fomo: best=...` lines with
+reasonable scores, the camera and the model are fine.
+
+## The main ESP32 (the actuator board)
+
+A second board, on the same Wi-Fi, which owns the **pump relay, the two nozzle
+servos and the water-level sensor**. The camera board detects and publishes
+coordinates; this board decides what to do with them. See
+`docs/target-protocol.md` for the wire contract.
+
+This board has **no camera**, so it has plenty of pins free. The relay stays on
+GPIO14 so the wiring habit from the camera board carries over.
+
+| Part | ESP32-S3 | Wiring |
+|------|----------|--------|
+| Relay IN (water pump) | GPIO14 | GPIO14 -> 1k ohm -> relay `IN` ; relay `GND` -> GND |
+| Pan servo signal | GPIO16 | GPIO16 -> servo signal ; servo VCC -> 5V ; servo GND -> GND |
+| Tilt servo signal | GPIO17 | GPIO17 -> servo signal ; servo VCC -> 5V ; servo GND -> GND |
+| Water level (analog) | GPIO1 | to the sensor's analog out ; sensor VCC -> 3V3 ; sensor GND -> GND |
+| Water float switch (optional) | GPIO4 | to the switch ; a 10k pull-up to 3V3 ; the switch pulls it LOW when the water is present |
+| Status LED | GPIO21 | GPIO21 -> 330 ohm -> LED anode ; LED cathode -> GND |
+
+Read in `firmware/esp32_main/main/main.c` (`PIN_RELAY`, `PIN_SERVO_PAN`,
+`PIN_SERVO_TILT`, `PIN_WATER_ADC`, `PIN_WATER_FLOAT`, `PIN_LED`).
+
+### Servo power
+
+Servos draw far more current than a GPIO can supply and **brownout the board**
+mid-move, which reads as a crash rather than a power problem. Give the servos
+their **own 5 V supply** and share **only the ground** with the ESP32. The
+signal line is the ESP32's to drive -- never the power.
+
+Add a **100 µF capacitor across the servo's VCC and GND** at the servo. A servo
+draws a large inrush when it starts moving, and without bulk capacitance at
+the servo the rail sags and the board resets.
+
+Common hobby servos (SG90 and clones) expect a 50 Hz signal with a pulse of
+roughly 500–2400 µs for 0–180°. Those are the defaults in
+`main_config` (`pulse_min` / `pulse_max`); a servo with a different range
+needs those two numbers changed and nothing else.
+
+### The float switch is optional, and it is the better sensor
+
+The analog reading gives the dashboard a percentage to show. The float switch
+gives a hard "there is water" or "there is not". When it is fitted it
+**overrides** the analog reading, because a float switch cannot drift and
+cannot read falsely -- which an analog float sensor in conductive water
+absolutely can.
+
+Wiring it the other way round (pulled up by the input, pulled LOW by the
+water) is what the firmware expects: LOW means water.
+
+The failure posture is **fail-closed**. An invalid, missing or disconnected
+reading is treated as *not enough water*, never as *fine*. A board that cannot
+read its tank must not spray.
+
+### Water-level calibration
+
+The analog reading is scaled over the ADC's full range, which is close enough
+for a threshold but not for a proper gauge. To calibrate:
+
+1. Put the sensor in an EMPTY tank, note the reading.
+2. Put it in a FULL tank, note the reading.
+3. Set `water_min` (the level below which cleaning is refused) as a
+   percentage between the two.
+
+`GET /status` reports the raw ADC value, so you can watch it while you
+adjust.
+
+### Relay polarity
+
+Identical to the camera board: most single-channel modules are **active-LOW**,
+and the default in `main_config` is active-low. Confirm with a continuity
+probe between `GND` and `IN` — if the relay clicks, it is active-low. Flip it
+with `POST /config -d 'relay_active_low=0'`.
+
+Use `NO`, not `NC`, and add a flyback diode (1N4007, cathode toward the
+positive terminal) across the pump.

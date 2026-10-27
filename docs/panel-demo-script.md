@@ -41,12 +41,20 @@ There is **no Raspberry Pi** — the edge device is an **ESP32-S3**.
    - Trigger a manual spray: Dashboard -> **Control** -> Spray now (pump runs).
    - Real detection: place the prepared test object in the pen's view; wait for
      cooldown; pump fires automatically (decided on-device).
-   - Open **History**: show the new row (time, FOMO confidence,
-     source=esp32s3, model=FOMO, triggered=Yes) and the **YOLOv8 ✓** verified badge.
+   - **Multi-instance**: place several test objects at once — the live view
+     draws one box per feces spot and labels them `FECES ×N`; the spray fires
+     once per frame (not once per spot).
+   - Open **History**: show the new row (time, FOMO confidence, **Instances**
+     count, source=esp32s3, model=FOMO, triggered=Yes) and the **YOLOv8 ✓**
+     verified badge.
 
 5. **Closing** (1 min)
    - Summarize results: FOMO on-device speed, YOLOv8 mAP50, detection-to-spray latency.
-   - Next steps: larger dataset, multi-pen scaling, FOMO model refinement.
+   - Multi-instance detection: one frame can hold many feces spots; the count
+     is reported end-to-end (see `docs/scaling-and-multi-camera.md`).
+   - Next steps: larger dataset, multi-pen scaling (number of cameras depends
+     on pen size and layout — the `cameras` registry is in place), FOMO model
+     refinement.
    - Q&A.
 
 ## Key numbers to have ready

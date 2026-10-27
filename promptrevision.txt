@@ -1,0 +1,72 @@
+Hi team! We need to update our integration plan for our *IoT-Based Pig Feces Cleaning System*. Please follow the architecture below and modify our existing code accordingly.
+
+### 1. System architecture
+
+We have only one pig pen. The camera detects feces and estimates its location, while the main ESP32 controls the cleaning hardware.
+
+*Workflow:*
+
+1. *ESP32-CAM:* Captures images of the pig pen and detects feces.
+2. *Coordinate generation:* The camera processing system identifies the detected feces location and sends its coordinates to the main ESP32.
+3. *Main ESP32:* Receives the coordinates and calculates the required pan and tilt servo angles.
+4. *Servo motors:* Move the spray nozzle toward the detected location.
+5. *Relay and water pump:* The main ESP32 activates the relay to start the water pump when the cleaning conditions are satisfied.
+6. *Cleaning process:* The nozzle sprays the detected location, with servo movements determined by the received coordinates.
+7. *Water-level monitoring:* The main ESP32 checks the water level and prevents automatic cleaning when water is insufficient.
+8. *Dashboard:* Displays the camera stream, detection information, water level, pump status, servo activity, and cleaning logs.
+
+### 2. Coordinate communication
+
+Please implement communication between the camera processing system and the main ESP32 over our shared Wi-Fi network.
+
+The coordinate message should contain:
+- The detected object's center X coordinate.
+- The detected object's center Y coordinate.
+- The image width and height, or normalized coordinates.
+- A detection confidence score.
+- A detection identifier or timestamp to help prevent duplicate triggers.
+
+For example, a message could contain:
+
+{"x":320,"y":240,"width":640,"height":480,"confidence":0.92}
+
+This is only an example message format. Please choose and implement a consistent format on both boards.
+
+The main ESP32 must convert the image coordinates into appropriate servo angles based on our camera position, pen dimensions, nozzle position, and servo limits. Image coordinates must not be treated directly as servo angles.
+
+### 3. Main ESP32 hardware responsibilities
+
+The main ESP32 must control:
+- Pump relay ON/OFF.
+- Both servo motors for nozzle positioning and sweeping.
+- Automatic and manual cleaning commands.
+- Water-level sensor readings and low-water protection.
+- Cleaning duration, cooldown, and system enable/disable state.
+
+The camera must not directly control the relay, pump, or servos. All hardware commands must go through the main ESP32.
+
+If the system is disabled, water is insufficient, a sensor reading is invalid, or a cleaning cycle is already running, the main ESP32 must handle the incoming message safely instead of starting another cycle.
+
+### 4. Dashboard requirements
+
+Please preserve our existing dashboard and extend it to show:
+- Live camera stream.
+- Feces detection status and confidence.
+- Detected X/Y coordinates.
+- Current servo target angles or positions.
+- Pump relay status.
+- Water-level reading and warning.
+- Cleaning status and event history.
+- Manual pump and servo testing controls, subject to safety restrictions.
+
+### 5. Development and testing
+
+Please inspect our existing camera, Python YOLOv8 verifier, main ESP32, and dashboard code before modifying anything.
+
+Determine whether the coordinates will come directly from the camera board or from the Python YOLOv8 server. Implement the actual communication path consistently.
+
+Please provide the updated code, wiring and pin assignments, network configuration, setup instructions, and step-by-step testing procedures.
+
+First test coordinate transmission and servo positioning without running the water pump. Then test the relay and pump separately, followed by the complete cleaning cycle with appropriate water-level protection.
+
+Our goal is to have the camera detect the feces location, send its coordinates to the main ESP32, and let the main ESP32 aim the nozzle at that location and control the complete cleaning process.
