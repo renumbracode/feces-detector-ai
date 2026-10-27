@@ -67,3 +67,17 @@ void spray_controller_set_config(float threshold, uint32_t cooldown_ms, uint32_t
  * leaves the relay in whichever state matches the new polarity, so the pump is
  * never left energised by the change. */
 void spray_controller_set_relay_polarity(bool active_low);
+
+/* Operator kill switch for AUTOMATIC sprays. When off:
+ *   - on_detection() and trigger_external() refuse to energise the relay and
+ *     run the alert-only path instead (LED + buzzer still fire, so a
+ *     detection is never silently dropped);
+ *   - a spray already running is cut immediately (relay opens, cooldown
+ *     window starts);
+ *   - force_spray() (manual override) STILL works: flipping the switch off
+ *     must not take water control away from an operator who asks for it by
+ *     hand.
+ * Call is_enabled() to report state. Persistence is the caller's business
+ * (NVS via app_config). */
+void spray_controller_set_enabled(bool on);
+bool spray_controller_is_enabled(void);

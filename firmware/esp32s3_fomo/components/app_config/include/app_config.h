@@ -31,6 +31,27 @@
 #define APP_STATIC_MASK_KEY  "static_mask"
 #define APP_STATIC_GW_KEY    "static_gw"
 
+/* Operator kill switch for the pump: when 0, automatic sprays are refused
+ * (detection still alerts and is still logged) until it is set back to 1.
+ * 13 characters, inside the 15-char NVS key limit. Absent = enabled, so a
+ * device that was never provisioned keeps spraying. */
+#define APP_SPRAY_ENABLED_KEY "spray_enabled"
+
+/* Where to publish detected feces coordinates for an external actuator board
+ * ("main ESP32") to aim at. See docs/target-protocol.md.
+ *
+ * This is ADDITIVE on purpose: the camera board keeps its own relay and its
+ * own local spray path exactly as they are, so it stays usable standalone.
+ * Publishing is a second, independent consumer of the same detection.
+ *
+ * Empty = publishing off. "target_enabled" is a separate switch so an operator
+ * can stop publishing without having to erase the address they will want back
+ * (a DHCP main board moves; the address is tedious to retype).
+ *
+ * 10 and 14 characters -- both inside the 15-char NVS key limit. */
+#define APP_TARGET_URL_KEY "target_url"
+#define APP_TARGET_ENABLED_KEY "target_enabled"
+
 /* Wi-Fi credentials are supplied per device and must not live in source. app_config
  * reads them from NVS (namespace "fomo_app", keys "wifi_ssid" / "wifi_pass") and
  * falls back to these only when NVS has no entry. Set them once with:
@@ -106,6 +127,14 @@ typedef struct {
     uint32_t spray_ms;
     bool relay_active_low;
     float server_trigger_conf;
+    /* Operator switch for the pump. true = automatic sprays allowed;
+     * false = the operator turned the sprayer OFF (detection still alerts
+     * and is still logged; only the relay is refused). */
+    bool spray_enabled;
+    /* External actuator board ("main ESP32") to publish detections to, and
+     * whether to publish at all. Empty target_url = publishing off. */
+    char target_url[129];
+    bool target_enabled;
     /* Optional static IPv4 addressing; all three empty = DHCP (the default).
      * Set together, never one at a time -- a partial set is rejected at load
      * so the device cannot end up with, say, an address but the wrong gateway

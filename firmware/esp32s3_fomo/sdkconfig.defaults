@@ -36,5 +36,27 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=n
 
 # Flash size
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_CUSTOM=n
+
+# Partition table -- the repo's partitions.csv IS the layout on the board
+#
+# CONFIG_PARTITION_TABLE_CUSTOM=y makes the build use partitions.csv instead of
+# ESP-IDF's built-in single-app table. This was flipped ON on 2026-10-27: the
+# single-app table leaves only a 1 MB app partition, which was 99.3% full and
+# could not fit the actuator-board publisher. partitions.csv gives the app
+# 0x1E0000 (1.875 MB) and adds a fat `storage` partition.
+#
+# The layout (verified by the boot log's own partition dump and by reading
+# 0x8000 off the board):
+#
+#   nvs       0x9000   0x6000 (24K)
+#   phy_init  0xf000   0x1000 (4K)
+#   factory   0x10000  0x1E0000 (1.875M)   <- the app partition
+#   storage   0x1F0000 0x210000 (2.06M)    <- fat, unused by the firmware
+#
+# NVS is at 0x9000/0x6000 in BOTH the old and the new layout, so switching
+# layouts does not touch the stored Wi-Fi credentials, the static address or
+# the URLs. Only the partition table at 0x8000 and the app at 0x10000 need
+# reflashing.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"

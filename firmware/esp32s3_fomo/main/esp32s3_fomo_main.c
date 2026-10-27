@@ -28,6 +28,7 @@
 #include "spray_controller.h"
 #include "http_server_service.h"
 #include "detection_service.h"
+#include "target_publisher.h"
 
 static const char *TAG = "fomo_main";
 
@@ -40,7 +41,13 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(e);
 
-    ESP_LOGI(TAG, "Boot: ESP32-S3 Feces Detector (FOMO + YOLOv8 verify)");
+    /* The build stamp is not decoration: the app partition is nearly full, so
+     * "which firmware is actually on the board" has to be answerable from the
+     * serial log alone, without assuming the flashed binary matches the
+     * working tree. __DATE__/__TIME__ are compile-time constants, so they
+     * identify the build itself rather than the moment of boot. */
+    ESP_LOGI(TAG, "Boot: ESP32-S3 Feces Detector (FOMO + YOLOv8 verify) idf=%s build=%s %s",
+             esp_get_idf_version(), __DATE__, __TIME__);
 
     app_config_t cfg;
     app_config_load(&cfg);
@@ -50,6 +57,14 @@ void app_main(void)
     spray_controller_init(APP_PIN_RELAY, APP_PIN_LED, APP_PIN_BUZZER,
                           cfg.threshold, cfg.cooldown_ms, cfg.spray_ms,
                           cfg.relay_active_low);
+    /* Operator switch from NVS: absent/default = enabled. Applied right after
+     * init so a device left switched OFF stays OFF across reboots. */
+    spray_controller_set_enabled(cfg.spray_enabled);
+
+    /* Where to publish detections for an external actuator board to aim at.
+     * Applied at boot so the setting takes effect immediately rather than
+     * after the detection loop's first config refresh. */
+    target_publisher_set_config(cfg.target_url, cfg.target_enabled);
 
     e = camera_service_init();
     if (e != ESP_OK) {

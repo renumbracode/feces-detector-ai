@@ -35,6 +35,7 @@
 #include "spray_controller.h"
 #include "detection_service.h"
 #include "wifi_service.h"
+#include "target_publisher.h"
 #include "http_server_service.h"
 
 static const char *TAG = "http_svc";
@@ -149,20 +150,59 @@ static esp_err_t handler_status(httpd_req_t *req)
     uint32_t stream_bps_snapshot = s_stream_bps;
     uint32_t free_sram = (uint32_t)esp_get_free_heap_size();
     /* fomo_result_t stores x,y as the box CENTROID; the dashboard overlay
-     * draws from the top-left corner, so convert here. */
+     * draws from the top-left corner, so convert here. Same conversion is
+     * applied per-box when building the multi-instance array below. */
     float tlx = last.x - last.width / 2.0f;
     float tly = last.y - last.height / 2.0f;
     if (tlx < 0.0f) tlx = 0.0f;
     if (tly < 0.0f) tly = 0.0f;
     if (tlx + last.width > 1.0f) tlx = 1.0f - last.width;
     if (tly + last.height > 1.0f) tly = 1.0f - last.height;
-    char buf[1280];
+
+    /* Multi-instance arrays: every feces box the on-device model (and the
+     * verifier) saw in the latest frame, top-left normalized, so the live
+     * view can draw one overlay per spot instead of only the best one. */
     /* vrf = the server-side YOLOv8 answer for the live frame, polled on a
      * fixed cadence so the dashboard overlay always has an independent
      * opinion. Display only: it never gates the relay, which stays on the
      * on-device FOMO class in detection_task(). */
     verify_result_t vr;
     detection_service_verify_result(&vr);
+
+    char fomo_boxes_json[FOMO_MAX_FECES_BOXES * 64 + 2] = "";
+    size_t fb_off = 0;
+    for (uint8_t i = 0; i < last.feces_count && i < FOMO_MAX_FECES_BOXES; i++) {
+        const fomo_box_t *b = &last.feces_boxes[i];
+        float bx = b->x - b->width / 2.0f;
+        float by = b->y - b->height / 2.0f;
+        if (bx < 0.0f) bx = 0.0f;
+        if (by < 0.0f) by = 0.0f;
+        if (bx + b->width > 1.0f) bx = 1.0f - b->width;
+        if (by + b->height > 1.0f) by = 1.0f - b->height;
+        int wrote = snprintf(fomo_boxes_json + fb_off, sizeof(fomo_boxes_json) - fb_off,
+            "%s{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f,\"conf\":%.4f}",
+            (i > 0) ? "," : "", (double)bx, (double)by,
+            (double)b->width, (double)b->height, (double)b->score);
+        if (wrote < 0 || (size_t)wrote >= sizeof(fomo_boxes_json) - fb_off) break;
+        fb_off += (size_t)wrote;
+    }
+
+    char vrf_boxes_json[VERIFY_MAX_FECES_BOXES * 48 + 2] = "";
+    size_t vb_off = 0;
+    for (uint8_t i = 0; i < vr.feces_count && i < VERIFY_MAX_FECES_BOXES; i++) {
+        const verify_box_t *b = &vr.feces_boxes[i];
+        int wrote = snprintf(vrf_boxes_json + vb_off, sizeof(vrf_boxes_json) - vb_off,
+            "%s{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f}",
+            (i > 0) ? "," : "", (double)b->x, (double)b->y,
+            (double)b->w, (double)b->h);
+        if (wrote < 0 || (size_t)wrote >= sizeof(vrf_boxes_json) - vb_off) break;
+        vb_off += (size_t)wrote;
+    }
+
+    /* 2.5 KB: the document carries both box arrays plus the actuator-board
+     * block, and it is built with snprintf into one buffer so a truncated
+     * field can never produce invalid JSON. */
+    char buf[2560];
 
     /* Link telemetry. rssi is reported as the raw dBm when associated, and
      * as the sentinel below when not, so the dashboard can distinguish "weak
@@ -172,15 +212,52 @@ static esp_err_t handler_status(httpd_req_t *req)
     int rssi = wifi_service_rssi();
     if (rssi == INT8_MIN) rssi = -128;
 
+    /* External actuator board ("main ESP32"). Reported so the operator can
+     * tell "the target was sent and refused" (low water, busy) apart from
+     * "the target never arrived" (the board is unreachable) -- the two look
+     * identical from the dashboard otherwise.
+     *
+     * The URL is truncated here: /status is a fixed-size JSON document and
+     * must not grow with operator input. The full URL is on /config. */
+    target_publisher_status_t tp;
+    target_publisher_status(&tp);
+    /* The precision is explicit so the truncation is intentional and visible
+     * to the compiler, rather than an accident it has to warn about. */
+    char tp_url[65];
+    snprintf(tp_url, sizeof(tp_url), "%.64s", tp.url);
+    char target_json[384];
+    snprintf(target_json, sizeof(target_json),
+             "{\"enabled\":%s,\"url\":\"%s\",\"lastOk\":%s,"
+             "\"lastAccepted\":%s,\"lastReason\":\"%s\",\"source\":\"%s\","
+             "\"lastPan\":%.1f,\"lastTilt\":%.1f,\"lastDetectionId\":%u,"
+             "\"lastOkAgeMs\":%llu,\"failures\":%u,\"published\":%u,\"dropped\":%u}",
+             tp.enabled ? "true" : "false",
+             tp_url,
+             tp.last_ok ? "true" : "false",
+             tp.last_accepted ? "true" : "false",
+             tp.last_reason,
+             tp.last_source,
+             (double)tp.last_pan, (double)tp.last_tilt,
+             (unsigned)tp.last_detection_id,
+             tp.last_ok_age_ms == UINT64_MAX
+                 ? (unsigned long long)-1
+                 : (unsigned long long)tp.last_ok_age_ms,
+             (unsigned)tp.failures,
+             (unsigned)tp.published,
+             (unsigned)tp.dropped);
+
     int n = snprintf(buf, sizeof(buf),
         "{\"ip\":\"%s\",\"heap\":%u,\"fps\":%.1f,\"streamBps\":%u,\"model\":\"%s\","
-        "\"sprayActive\":%s,\"cooldownActive\":%s,"
+        "\"sprayActive\":%s,\"cooldownActive\":%s,\"sprayEnabled\":%s,"
         "\"lastConfidence\":%.4f,\"objectPresent\":%s,"
-        "\"classId\":%d,\"box\":{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
+        "\"classId\":%d,\"fecesCount\":%u,\"boxes\":[%s],"
+        "\"box\":{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
         "\"vrf\":{\"valid\":%s,\"detected\":%s,\"conf\":%.4f,\"ageMs\":%u,"
+        "\"fecesCount\":%u,\"boxes\":[%s],"
         "\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f},"
         "\"wifiRssi\":%d,\"wifiConnected\":%s,\"wifiReconnects\":%u,"
         "\"verifyOk\":%s,\"verifyFailures\":%u,\"verifyOkAgeMs\":%llu,"
+        "\"target\":%s,"
         "\"lastSprayAgoMs\":%llu,\"uptimeS\":%llu,"
         "\"inferenceMs\":%u,\"detections\":%u}",
         wifi_ip_str(), (unsigned)free_sram,
@@ -189,15 +266,20 @@ static esp_err_t handler_status(httpd_req_t *req)
         edge_impulse_model_tag(),
         sp.spraying ? "true" : "false",
         sp.cooldown_active ? "true" : "false",
+        spray_controller_is_enabled() ? "true" : "false",
         (double)sp.last_confidence,
         last.object_present ? "true" : "false",
         last.class_id,
+        (unsigned)last.feces_count,
+        fomo_boxes_json,
         (double)tlx, (double)tly,
         (double)last.width, (double)last.height,
         vr.valid ? "true" : "false",
         vr.detected ? "true" : "false",
         (double)vr.conf,
         (unsigned)vr.age_ms,
+        (unsigned)vr.feces_count,
+        vrf_boxes_json,
         (double)vr.x, (double)vr.y, (double)vr.w, (double)vr.h,
         rssi,
         wifi_service_is_connected() ? "true" : "false",
@@ -212,6 +294,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         detection_service_last_verify_ok_age_ms() == UINT64_MAX
             ? (unsigned long long)-1
             : (unsigned long long)detection_service_last_verify_ok_age_ms(),
+        target_json,
         (unsigned long long)sp.last_spray_ago_ms,
         (unsigned long long)(esp_timer_get_time() / 1000000u),
         (unsigned)last.inference_ms,
@@ -221,11 +304,90 @@ static esp_err_t handler_status(httpd_req_t *req)
     return httpd_resp_send(req, buf, n);
 }
 
+/* Where the detections are published for an external actuator board
+ * ("main ESP32"). No reboot: the publisher takes its configuration live, so
+ * pointing the board at a different actuator board does not interrupt the
+ * detection loop.
+ *
+ * GET /target?url=<encoded>&enable=0|1
+ *
+ * The URL is stored in NVS so it survives a reboot, and applied to the
+ * publisher immediately. */
+static esp_err_t handler_target(httpd_req_t *req)
+{
+    prv_cors(req);
+    char buf[192] = "";
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK) {
+        target_publisher_status_t tp;
+        target_publisher_status(&tp);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no query\"}");
+        return ESP_OK;
+    }
+
+    app_config_t cfg;
+    app_config_load(&cfg);
+    bool changed = false;
+
+    char url[129] = "";
+    if (httpd_query_key_value(buf, "url", url, sizeof(url)) == ESP_OK) {
+        /* Same sanitising as POST /config: the URL is echoed inside the
+         * /status JSON, so a quote or backslash would break every consumer
+         * of that document. */
+        size_t j = 0;
+        for (size_t i = 0; url[i] != '\0' && j + 1 < sizeof(cfg.target_url); i++) {
+            char c = url[i];
+            if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
+            cfg.target_url[j++] = c;
+        }
+        cfg.target_url[j] = '\0';
+        changed = true;
+    }
+    char en[8] = "";
+    if (httpd_query_key_value(buf, "enable", en, sizeof(en)) == ESP_OK) {
+        cfg.target_enabled = (en[0] != '0');
+        changed = true;
+    }
+
+    if (changed) {
+        app_config_save(&cfg);
+        target_publisher_set_config(cfg.target_url, cfg.target_enabled);
+    }
+
+    target_publisher_status_t tp;
+    target_publisher_status(&tp);
+    char out[220];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"enabled\":%s,\"url\":\"%s\"}",
+             tp.enabled ? "true" : "false", tp.url);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 static esp_err_t handler_spray(httpd_req_t *req)
 {
     prv_cors(req);
-    char buf[16] = "0";
+    /* "enable" and "duration" can both appear in the query; the old 16-byte
+     * buffer silently truncated "?duration=180000&enable=0" so neither key was
+     * found -- 96 B leaves headroom for both. */
+    char buf[96] = "";
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        /* Operator kill switch, no reboot: GET /spray?enable=0|1. Persisted to
+         * NVS so the pen stays in whichever state the operator left it across
+         * power cycles. */
+        char en[8] = "";
+        if (httpd_query_key_value(buf, "enable", en, sizeof(en)) == ESP_OK) {
+            bool on = (en[0] != '0');
+            app_config_t cfg;
+            app_config_load(&cfg);
+            cfg.spray_enabled = on;
+            app_config_save(&cfg);
+            spray_controller_set_enabled(on);
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, on ? "{\"ok\":true,\"sprayEnabled\":true}"
+                                        : "{\"ok\":true,\"sprayEnabled\":false}");
+            return ESP_OK;
+        }
         char dur[16] = "0";
         if (httpd_query_key_value(buf, "duration", dur, sizeof(dur)) == ESP_OK) {
             uint32_t ms = (uint32_t)strtoul(dur, NULL, 10);
@@ -248,18 +410,24 @@ static esp_err_t handler_config(httpd_req_t *req)
     app_config_t cfg;
     app_config_load(&cfg);
 
-    char buf[512];
+    /* 768 B: the document now also carries the actuator-board URL, which is up
+     * to 128 characters on its own. */
+    char buf[768];
     int n = snprintf(buf, sizeof(buf),
         "{\"threshold\":%.2f,\"server_trigger_conf\":%.2f,"
         "\"cooldown_ms\":%u,\"spray_ms\":%u,"
-        "\"relay_active_low\":%s,"
+        "\"relay_active_low\":%s,\"spray_enabled\":%s,"
         "\"static_ip\":\"%s\",\"static_mask\":\"%s\",\"static_gw\":\"%s\","
-        "\"verify_url\":\"%s\",\"dash_url\":\"%s\",\"dash_verify_url\":\"%s\"}",
+        "\"verify_url\":\"%s\",\"dash_url\":\"%s\",\"dash_verify_url\":\"%s\","
+        "\"target_url\":\"%s\",\"target_enabled\":%s}",
         (double)cfg.threshold, (double)cfg.server_trigger_conf,
         (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
         cfg.relay_active_low ? "true" : "false",
+        cfg.spray_enabled ? "true" : "false",
         cfg.static_ip, cfg.static_mask, cfg.static_gw,
-        cfg.verify_url, cfg.dash_url, cfg.dash_verify_url);
+        cfg.verify_url, cfg.dash_url, cfg.dash_verify_url,
+        cfg.target_url,
+        cfg.target_enabled ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -404,6 +572,32 @@ static esp_err_t handler_config_post(httpd_req_t *req)
     if (httpd_query_key_value(body, "spray_ms", val, sizeof(val)) == ESP_OK) {
         cfg.spray_ms = (uint32_t)strtoul(val, NULL, 10);
     }
+    /* Spray kill switch as a config field too (persisted; this POST reboots,
+     * and boot applies it). GET /spray?enable= is the no-reboot path used by
+     * the dashboard button. */
+    if (httpd_query_key_value(body, "spray_enabled", val, sizeof(val)) == ESP_OK) {
+        cfg.spray_enabled = (val[0] != '0');
+        spray_controller_set_enabled(cfg.spray_enabled);
+    }
+    /* Where to publish detections for an external actuator board ("main
+     * ESP32") to aim at. See docs/target-protocol.md.
+     *
+     * The URL is sanitised before it is stored, because it is echoed back
+     * inside the /status JSON document: a quote or a backslash typed into the
+     * setup form would otherwise produce invalid JSON for every consumer of
+     * /status. Only the characters an http:// URL actually needs survive. */
+    if (prv_get_decoded(body, "target_url", val, sizeof(val))) {
+        size_t j = 0;
+        for (size_t i = 0; val[i] != '\0' && j + 1 < sizeof(cfg.target_url); i++) {
+            char c = val[i];
+            if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
+            cfg.target_url[j++] = c;
+        }
+        cfg.target_url[j] = '\0';
+    }
+    if (httpd_query_key_value(body, "target_enabled", val, sizeof(val)) == ESP_OK) {
+        cfg.target_enabled = (val[0] != '0');
+    }
     /* Optional static addressing. All three must be supplied together; the
      * loader rejects a partial set so a half-configured address cannot strand
      * the board with no route to correct it. Send empty strings to return to
@@ -472,7 +666,8 @@ static esp_err_t handler_setup(httpd_req_t *req)
     app_config_t cfg;
     app_config_load(&cfg);
 
-    char *page = malloc(4608);
+    /* 6 KB: the page grew with the actuator-board section. */
+    char *page = malloc(6144);
     if (page == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
         return ESP_OK;
@@ -487,13 +682,16 @@ static esp_err_t handler_setup(httpd_req_t *req)
     prv_html_escape(cfg.verify_url, esc_verify, sizeof(esc_verify));
     prv_html_escape(cfg.dash_url, esc_dash, sizeof(esc_dash));
     prv_html_escape(cfg.dash_verify_url, esc_dash_v, sizeof(esc_dash_v));
+    /* The actuator-board URL also goes into a value='...' attribute. */
+    char esc_target[160];
+    prv_html_escape(cfg.target_url, esc_target, sizeof(esc_target));
     /* Addresses go into value='...' too, so escape them the same way. */
     char esc_static_ip[24], esc_static_mask[24], esc_static_gw[24];
     prv_html_escape(cfg.static_ip, esc_static_ip, sizeof(esc_static_ip));
     prv_html_escape(cfg.static_mask, esc_static_mask, sizeof(esc_static_mask));
     prv_html_escape(cfg.static_gw, esc_static_gw, sizeof(esc_static_gw));
 
-    int n = snprintf(page, 4608,
+    int n = snprintf(page, 6144,
         "<!doctype html><html><head><title>Feces Detector setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
@@ -513,6 +711,18 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "<label>Dashboard API URL</label><input name='dash_url' value='%s' maxlength='256'>"
         "<label>Dashboard verify URL (yolo_conf report)</label><input name='dash_verify_url' "
         "value='%s' maxlength='256'>"
+        "<label>Actuator board (main ESP32) target URL</label>"
+        "<input name='target_url' value='%s' maxlength='128' "
+        "placeholder='http://192.168.254.60:8080/target'>"
+        "<label>Publish detections to the actuator board</label>"
+        "<select name='target_enabled'>"
+        "<option value='1'%s>Enabled — send detected coordinates</option>"
+        "<option value='0'%s>Disabled — detect only</option></select>"
+        "<p style='font-size:13px;color:#94a3b8'>The actuator board owns the pump "
+        "and the servos. This board sends it the coordinates and nothing else. "
+        "While it is connected, switch this board's own pump off "
+        "(<code>spray_enabled=0</code>) so one detection does not spray twice. "
+        "See docs/target-protocol.md.</p>"
         "<label>Detection threshold (0..1) — spray dial</label><input type='number' step='0.01' "
         "name='threshold' value='%.2f' min='0' max='1'>"
         "<label>YOLOv8 trigger confidence (0..1) — server-gated spray</label>"
@@ -544,6 +754,9 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "<button type='submit'>Save &amp; restart</button></form>"
         "</body></html>",
         esc_ssid, esc_pass, esc_verify, esc_dash, esc_dash_v,
+        esc_target,
+        cfg.target_enabled ? " selected" : "",
+        cfg.target_enabled ? "" : " selected",
         (double)cfg.threshold, (double)cfg.server_trigger_conf,
         esc_static_ip, esc_static_mask, esc_static_gw,
         (unsigned)cfg.cooldown_ms, (unsigned)cfg.spray_ms,
@@ -712,6 +925,7 @@ static httpd_uri_t uris[] = {
     { .uri = "/",       .method = HTTP_GET,  .handler = handler_index,       .user_ctx = NULL },
     { .uri = "/status", .method = HTTP_GET,  .handler = handler_status,      .user_ctx = NULL },
     { .uri = "/spray",  .method = HTTP_GET,  .handler = handler_spray,       .user_ctx = NULL },
+    { .uri = "/target", .method = HTTP_GET,  .handler = handler_target,      .user_ctx = NULL },
     { .uri = "/config", .method = HTTP_GET,  .handler = handler_config,      .user_ctx = NULL },
     { .uri = "/config", .method = HTTP_POST, .handler = handler_config_post, .user_ctx = NULL },
     { .uri = "/setup",  .method = HTTP_GET,  .handler = handler_setup,       .user_ctx = NULL },

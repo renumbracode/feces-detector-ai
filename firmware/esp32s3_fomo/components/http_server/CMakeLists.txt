@@ -3,4 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES esp_http_server esp_timer esp_wifi esp_system freertos
         camera inference spray app_config detection_service wifi_service
+        target_publisher
 )

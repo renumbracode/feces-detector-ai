@@ -12,11 +12,22 @@ esp_err_t detection_service_start(void);
 /* Latest YOLOv8 verification of the live camera frame, polled on a fixed
  * cadence so the dashboard overlay has a real detection even while the
  * on-device FOMO model is still a pre-export stub. Normalized 0..1 box. */
+#define VERIFY_MAX_FECES_BOXES 4
+
+typedef struct {
+    float x, y, w, h; /* normalized box, 0..1 */
+} verify_box_t;
+
 typedef struct {
     bool     valid;      /* a verify round-trip has completed at least once */
     bool     detected;   /* verifier reported a target-class box */
     float    conf;       /* best target-class confidence */
-    float    x, y, w, h; /* normalized box, 0..1 */
+    float    x, y, w, h; /* normalized box of the best target box, 0..1 */
+    /* All target-class boxes above the server's confidence floor (score
+     * descending, capped at VERIFY_MAX_FECES_BOXES). x,y,w,h above mirror
+     * feces_boxes[0] when any exist. */
+    verify_box_t feces_boxes[VERIFY_MAX_FECES_BOXES];
+    uint8_t feces_count; /* instance count reported by the verifier */
     uint32_t age_ms;     /* ms since this result was produced */
 } verify_result_t;
 

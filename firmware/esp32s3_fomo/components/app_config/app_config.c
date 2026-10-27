@@ -53,6 +53,12 @@ static void prv_defaults(app_config_t *cfg)
     cfg->spray_ms = APP_DEFAULT_SPRAY_MS;
     cfg->relay_active_low = APP_DEFAULT_RELAY_ACTIVE_LOW ? true : false;
     cfg->server_trigger_conf = APP_DEFAULT_SERVER_TRIGGER_CONF;
+    cfg->spray_enabled = true;   /* absent key in prv_defaults() sense: pump allowed */
+    /* Publishing to an external actuator board is off until an operator points
+     * the board at one. A device that was never provisioned must not start
+     * POSTing to an address nobody chose. */
+    cfg->target_url[0] = '\0';
+    cfg->target_enabled = false;
     /* Empty = DHCP. prv_load_static() decides whether to honour them. */
     cfg->static_ip[0] = '\0';
     cfg->static_mask[0] = '\0';
@@ -140,11 +146,39 @@ esp_err_t app_config_load(app_config_t *cfg)
         cfg->relay_active_low = (low != 0);
     }
 
+    /* Operator spray switch, stored as u8 (0 = pump disabled, 1 = allowed).
+     * Absent key = enabled: a device that was never toggled sprays normally,
+     * and "OFF" is always a deliberate operator act, never a default. */
+    uint8_t en = 1;
+    if (nvs_get_u8(h, APP_SPRAY_ENABLED_KEY, &en) == ESP_OK) {
+        cfg->spray_enabled = (en != 0);
+    }
+
     /* Absent on devices provisioned before server-gated spray existed, in which
      * case the prv_defaults() value stands. */
     {
         size_t len = sizeof(cfg->server_trigger_conf);
         nvs_get_blob(h, APP_SERVER_TRIGGER_CONF_KEY, &cfg->server_trigger_conf, &len);
+    }
+
+    /* External actuator board. Absent keys -> prv_defaults() values, which
+     * mean "publishing off", so an old device never starts POSTing on its own
+     * after a firmware update. */
+    nvs_get_str(h, APP_TARGET_URL_KEY, cfg->target_url,
+                &(size_t){ sizeof(cfg->target_url) });
+    {
+        uint8_t ten = 0;
+        if (nvs_get_u8(h, APP_TARGET_ENABLED_KEY, &ten) == ESP_OK) {
+            cfg->target_enabled = (ten != 0);
+        }
+    }
+    /* An enabled switch with no address is not a usable configuration: the
+     * publisher would have nothing to POST to. Force it off and say so,
+     * rather than logging a URL-not-set error on every detection. */
+    if (cfg->target_enabled && cfg->target_url[0] == '\0') {
+        cfg->target_enabled = false;
+        ESP_LOGW(TAG, "target_enabled was set but target_url is empty; "
+                      "publishing to an actuator board is OFF");
     }
 
     prv_load_static(cfg, h);
@@ -168,8 +202,11 @@ void app_config_save(const app_config_t *cfg)
     nvs_set_u32(h, "cooldown_ms", cfg->cooldown_ms);
     nvs_set_u32(h, "spray_ms", cfg->spray_ms);
     nvs_set_u8(h, APP_RELAY_ACTIVE_LOW_KEY, cfg->relay_active_low ? 1 : 0);
+    nvs_set_u8(h, APP_SPRAY_ENABLED_KEY, cfg->spray_enabled ? 1 : 0);
     nvs_set_blob(h, APP_SERVER_TRIGGER_CONF_KEY, &cfg->server_trigger_conf,
                  sizeof(cfg->server_trigger_conf));
+    nvs_set_str(h, APP_TARGET_URL_KEY, cfg->target_url);
+    nvs_set_u8(h, APP_TARGET_ENABLED_KEY, cfg->target_enabled ? 1 : 0);
     nvs_set_str(h, APP_STATIC_IP_KEY, cfg->static_ip);
     nvs_set_str(h, APP_STATIC_MASK_KEY, cfg->static_mask);
     nvs_set_str(h, APP_STATIC_GW_KEY, cfg->static_gw);

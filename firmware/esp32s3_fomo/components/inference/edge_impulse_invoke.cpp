@@ -143,6 +143,17 @@ static bool prv_run_stub(const uint8_t *input_rgb888, int w, int h,
     out->y = 0.5f;
     out->width = 0.2f;
     out->height = 0.2f;
+    /* Mirror the single synthetic spot into the multi-instance array so the
+     * rest of the pipeline (count reporting, /status boxes) works identically
+     * on the stub and on a real model. */
+    if (out->object_present) {
+        out->feces_boxes[0].x = out->x;
+        out->feces_boxes[0].y = out->y;
+        out->feces_boxes[0].width = out->width;
+        out->feces_boxes[0].height = out->height;
+        out->feces_boxes[0].score = score;
+        out->feces_count = 1;
+    }
 
     *elapsed_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000u);
     return true;
@@ -209,21 +220,39 @@ ei_impulse_result_t result = { 0 };
                  (unsigned)result.bounding_boxes_count);
     }
 
-    /* Prefer the highest-scoring FECES box. A co-present pig box must not
-     * suppress the target class (the old code kept only the globally top box,
-     * so a strong pig box could mask a weaker-but-real feces hit). Pig is kept
-     * as the fallback so a pig-only frame still reports a non-target class id
-     * instead of -1. Note: this SDK revision iters bounding boxes by LABEL
+    /* Multi-instance scan: every feces box above the floor is kept (sorted by
+     * score descending, capped at FOMO_MAX_FECES_BOXES), so the device can
+     * report HOW MANY feces spots are in one frame, not just the best one.
+     * The legacy single-box fields (score/class_id/x..height) still describe
+     * the winning box: the highest-scoring FECES box is preferred so a
+     * co-present pig box can never mask the target class; a pig-only frame
+     * keeps the best pig in the legacy fields (class_id = pig) with
+     * feces_count = 0. Note: this SDK revision iters bounding boxes by LABEL
      * (class name string) rather than a numeric id. */
-    int32_t best_feces = -1, best_pig = -1;
+    int32_t best_pig = -1;
+    fomo_box_t feces[FOMO_MAX_FECES_BOXES];
+    uint8_t feces_n = 0;
     for (size_t i = 0; i < result.bounding_boxes_count; ++i) {
         const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[i];
         if (bb->value < EI_FOMO_PRESENT_THRESHOLD) {
             continue;
         }
         if (strcmp(bb->label, "feces") == 0) {
-            if (best_feces < 0 || bb->value > result.bounding_boxes[best_feces].value) {
-                best_feces = (int32_t)i;
+            /* Insertion sort by score descending into the fixed array. */
+            fomo_box_t nb;
+            nb.x = (bb->x + bb->width / 2.0f) / (float)iw;
+            nb.y = (bb->y + bb->height / 2.0f) / (float)ih;
+            nb.width = (float)bb->width / (float)iw;
+            nb.height = (float)bb->height / (float)ih;
+            nb.score = bb->value;
+            uint8_t pos = feces_n;
+            while (pos > 0 && feces[pos - 1].score < nb.score) {
+                if (pos < FOMO_MAX_FECES_BOXES) feces[pos] = feces[pos - 1];
+                pos--;
+            }
+            if (pos < FOMO_MAX_FECES_BOXES) {
+                feces[pos] = nb;
+                if (feces_n < FOMO_MAX_FECES_BOXES) feces_n++;
             }
         } else if (strcmp(bb->label, "pig") == 0) {
             if (best_pig < 0 || bb->value > result.bounding_boxes[best_pig].value) {
@@ -232,15 +261,27 @@ ei_impulse_result_t result = { 0 };
         }
     }
 
+    out->feces_count = feces_n;
+    for (uint8_t i = 0; i < feces_n; i++) {
+        out->feces_boxes[i] = feces[i];
+    }
+
     out->score = 0.0f;
     out->class_id = -1;
-    int32_t pick = (best_feces >= 0) ? best_feces : best_pig;
-    if (pick >= 0) {
-        const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[pick];
+    if (feces_n > 0) {
+        out->score = feces[0].score;
+        out->class_id = EI_CLASS_FECES;
+        /* Legacy single-box fields mirror the best feces box. This SDK
+         * reports boxes in pixel coords of the model input; feces[] already
+         * carries the converted normalized centroid+size. */
+        out->x = feces[0].x;
+        out->y = feces[0].y;
+        out->width = feces[0].width;
+        out->height = feces[0].height;
+    } else if (best_pig >= 0) {
+        const ei_impulse_result_bounding_box_t *bb = &result.bounding_boxes[best_pig];
         out->score = bb->value;
-        out->class_id = (strcmp(bb->label, "feces") == 0) ? EI_CLASS_FECES : EI_CLASS_PIG;
-        /* This SDK reports boxes in pixel coords of the model input; convert
-         * to the normalized 0..1 centroid+size that fomo_result_t carries. */
+        out->class_id = EI_CLASS_PIG;
         out->x = (bb->x + bb->width / 2.0f) / (float)iw;
         out->y = (bb->y + bb->height / 2.0f) / (float)ih;
         out->width = (float)bb->width / (float)iw;
@@ -248,13 +289,15 @@ ei_impulse_result_t result = { 0 };
     }
 
     out->object_present = out->class_id == EI_CLASS_FECES;
-    /* Report the actual winning score, not just the box count. When the model
-     * is not seeing feces this prints score=0.00 class=none, which is how we
-     * tell "model found nothing" apart from "model found something too weak to
-     * act on" -- the two look identical from /status otherwise. */
-    ESP_LOGI(TAG, "fomo: best=%s score=%.3f class=%d (floor %.2f)",
-             (pick >= 0) ? result.bounding_boxes[pick].label : "none",
-             (double)out->score, (int)out->class_id,
+    /* Report the actual winning score and the instance count, not just the
+     * box count. When the model is not seeing feces this prints score=0.00
+     * class=none feces=0, which is how we tell "model found nothing" apart
+     * from "model found something too weak to act on" -- the two look
+     * identical from /status otherwise. */
+    ESP_LOGI(TAG, "fomo: best=%s score=%.3f class=%d feces_count=%u (floor %.2f)",
+             (out->class_id == EI_CLASS_FECES) ? "feces"
+                 : (out->class_id == EI_CLASS_PIG) ? "pig" : "none",
+             (double)out->score, (int)out->class_id, (unsigned)out->feces_count,
              (double)EI_FOMO_PRESENT_THRESHOLD);
 
     *elapsed_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000u);

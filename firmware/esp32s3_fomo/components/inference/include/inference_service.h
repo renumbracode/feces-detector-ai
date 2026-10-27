@@ -5,6 +5,21 @@
 
 #include "esp_err.h"
 
+/* Multi-instance support: one frame can hold several feces spots. The FOMO
+ * heat map is scanned as a whole, and every cell above the presentation floor
+ * becomes one entry, so the count reflects the pen state rather than a single
+ * "worst spot" summary. */
+#define FOMO_MAX_FECES_BOXES 8
+
+/* One normalized detection box (centroid + size, 0..1). */
+typedef struct {
+    float x;                 /* normalized centroid x (0..1) */
+    float y;                 /* normalized centroid y (0..1) */
+    float width;             /* normalized estimated width (0..1) */
+    float height;            /* normalized estimated height (0..1) */
+    float score;             /* class score (0..1) */
+} fomo_box_t;
+
 /* Result of one FOMO inference pass. */
 typedef struct {
     bool object_present;     /* FOMO "feces" score above configured threshold */
@@ -12,10 +27,16 @@ typedef struct {
     int class_id;            /* label of the winning box: 0 = feces (target),
                                 1 = pig (suppressor). -1 when nothing detected. */
     float x;                 /* normalized centroid x of largest blob (0..1) */
-    float y;                 /* normalized centroid y (0..1) */
+    float y;                 /* normalized centroid y of largest blob (0..1) */
     float width;             /* normalized estimated width (0..1) */
     float height;            /* normalized estimated height (0..1) */
     uint32_t inference_ms;   /* time taken for this inference */
+    /* All feces boxes above the presentation floor, sorted by score
+     * descending, capped at FOMO_MAX_FECES_BOXES. x..height above mirror
+     * feces_boxes[0] when the winning class is feces, kept for legacy
+     * consumers. */
+    fomo_box_t feces_boxes[FOMO_MAX_FECES_BOXES];
+    uint8_t feces_count;     /* number of entries in feces_boxes (0..max) */
 } fomo_result_t;
 
 /* Class ids the trained model emits. Only the feces class ever triggers a

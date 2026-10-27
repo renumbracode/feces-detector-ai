@@ -85,6 +85,12 @@ static const char *TAG = "camera_svc";
 #define EXPECTED_WIDTH  640
 #define EXPECTED_HEIGHT 480
 
+/* The size the sensor actually delivered, published to the actuator board so
+ * its coordinate conversion works against the real frame rather than the
+ * requested one. */
+static volatile uint16_t s_frame_w = EXPECTED_WIDTH;
+static volatile uint16_t s_frame_h = EXPECTED_HEIGHT;
+
 static volatile bool s_streaming = false;
 static volatile int s_streaming_refs = 0;
 
@@ -157,6 +163,11 @@ esp_err_t camera_service_init(void)
         ESP_LOGI(TAG, "first frame %ux%u, %u bytes (format %u)",
                  (unsigned)probe->width, (unsigned)probe->height,
                  (unsigned)probe->len, (unsigned)probe->format);
+        /* Remember what the sensor actually delivered, not what was asked for.
+         * The actuator board's coordinate message carries the frame size the
+         * coordinates refer to, so it must be the real one. */
+        s_frame_w = (uint16_t)probe->width;
+        s_frame_h = (uint16_t)probe->height;
         if (probe->width != EXPECTED_WIDTH || probe->height != EXPECTED_HEIGHT) {
             ESP_LOGW(TAG, "sensor delivered %ux%u but CAM_FRAMESIZE implies %ux%u",
                      (unsigned)probe->width, (unsigned)probe->height,
@@ -165,10 +176,21 @@ esp_err_t camera_service_init(void)
         esp_camera_fb_return(probe);
     } else {
         ESP_LOGE(TAG, "no frame available right after init");
+        /* Fall back to the requested size: a wrong number here only affects
+         * the frame size published to the actuator board, and a slightly
+         * wrong one is better than a zero that would divide by nothing. */
+        s_frame_w = EXPECTED_WIDTH;
+        s_frame_h = EXPECTED_HEIGHT;
     }
 
     ESP_LOGI(TAG, "Camera ready (OV3660 class sensor, JPEG)");
     return ESP_OK;
+}
+
+void camera_service_frame_size(uint16_t *w, uint16_t *h)
+{
+    if (w) *w = s_frame_w;
+    if (h) *h = s_frame_h;
 }
 
 camera_fb_t *camera_service_get_frame(void)

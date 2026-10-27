@@ -31,6 +31,7 @@
 #include "inference_service.h"
 #include "spray_controller.h"
 #include "detection_service.h"
+#include "target_publisher.h"
 
 static const char *TAG = "detect";
 
@@ -110,6 +111,25 @@ static volatile uint32_t s_detection_count = 0;
  * was too tight on a hotspot. */
 #define VERIFY_TIMEOUT_MS 5000
 
+/* Timeout used once a poll has already FAILED, i.e. when the server is known
+ * to be unreachable. The poll runs inline in the detect loop, so a long
+ * timeout against a dead server blocks the whole detection cycle. This does
+ * NOT apply to a healthy server: while s_verify_ok is true the full
+ * VERIFY_TIMEOUT_MS is used, so a slow-but-working server is never cut off. */
+#define VERIFY_TIMEOUT_MS_FAILED 2000
+
+/* How old a YOLOv8 answer may be and still be used as the location sent to
+ * the actuator board.
+ *
+ * The verifier's box is a TIGHTER localisation than the on-device FOMO blob,
+ * so it is the better thing to aim at -- but it describes a frame captured
+ * one poll ago (2-5 s), not the live frame. That is acceptable: a feces spot
+ * on the pen floor does not move, so a slightly old precise box still points
+ * at the right place, whereas the FOMO box is a coarser estimate of the
+ * current frame. Past this age the answer is no longer about the same scene
+ * and the live FOMO box is used instead. */
+#define TARGET_YOLO_FRESH_MS 10000
+
 /* Find "\"key\":" then parse the following number. Used on trusted LAN JSON. */
 static long prv_parse_int_key(const char *json, const char *key)
 {
@@ -153,6 +173,52 @@ static bool prv_parse_box_norm(const char *json, float *x, float *y,
     *w = prv_parse_float_key(obj, "w");
     *h = prv_parse_float_key(obj, "h");
     return (*w > 0.001f && *h > 0.001f);
+}
+
+/* Parse the verifier's multi-instance array
+ *   "boxes_norm":[{"x":..,"y":..,"w":..,"h":..}, ...]
+ * into out[] (max max_out entries). Returns the number of boxes parsed.
+ * The server caps this array at the same VERIFY_MAX_FECES_BOXES the firmware
+ * holds, so nothing is silently dropped on the wire for the sizes in use. */
+static int prv_parse_boxes_norm(const char *json, verify_box_t *out,
+                                int max_out)
+{
+    const char *p = strstr(json, "\"boxes_norm\":");
+    if (p == NULL) return 0;
+    p = strchr(p, '[');
+    if (p == NULL) return 0;
+    int n = 0;
+    while (n < max_out) {
+        const char *open = strchr(p, '{');
+        const char *close = strchr(p, ']');
+        if (open == NULL) break;
+        if (close != NULL && close < open) break; /* array ended */
+        char obj[128];
+        size_t i = 0;
+        p = open;
+        while (p[i] != '}' && p[i] != '\0' && i + 1 < sizeof(obj)) {
+            obj[i] = p[i];
+            i++;
+        }
+        if (p[i] != '}') break;
+        obj[i] = '}';
+        obj[i + 1] = '\0';
+        float x = prv_parse_float_key(obj, "x");
+        float y = prv_parse_float_key(obj, "y");
+        float w = prv_parse_float_key(obj, "w");
+        float h = prv_parse_float_key(obj, "h");
+        if (w > 0.001f && h > 0.001f) {
+            out[n].x = x;
+            out[n].y = y;
+            out[n].w = w;
+            out[n].h = h;
+            n++;
+        }
+        p = strchr(p, '}');
+        if (p == NULL) break;
+        p++;
+    }
+    return n;
 }
 
 /* Parse a JSON boolean: "\"key\":" followed by true/false. */
@@ -221,10 +287,16 @@ static esp_http_client_handle_t prv_client_init(body_sink_t *sink, char *buf,
  * original wording so existing history rows and the demo script still read the
  * same; server-gated rows say so explicitly, because a row triggered by
  * YOLOv8 at 0.28 is a materially different claim from one the board made on its
- * own FOMO score, and the dashboard must not blur the two. */
+ * own FOMO score, and the dashboard must not blur the two.
+ *
+ * bx/by/bw/bh locate the primary feces box (top-left normalized 0..1, the
+ * same convention as /status). Pass bw <= 0 for "no geometry" and the
+ * coordinates are omitted from the URL so the row keeps NULL columns rather
+ * than a fabricated position. */
 static long prv_post_dashboard(const app_config_t *cfg, float conf,
                                bool triggered, uint32_t spray_ms,
-                               const char *source)
+                               const char *source, uint32_t instance_count,
+                               float bx, float by, float bw, float bh)
 {
     /* notes travels as a URL query value, so it must contain no raw spaces --
      * an unencoded space makes the whole URL invalid and esp_http_client
@@ -233,20 +305,39 @@ static long prv_post_dashboard(const app_config_t *cfg, float conf,
      * space, so it works only by accident); Api.php turns them back into
      * spaces on insert. */
     char notes[48];
+    /* When the operator has the pump switched off, the row must say the pen
+     * SAW feces and deliberately did not spray -- "cooldown_detected" would
+     * blame the timer, which is a different (and false) claim. */
+    const bool off = !spray_controller_is_enabled();
     if (source == NULL || strcmp(source, "fomo") == 0) {
-        strncpy(notes, triggered ? "auto_spray" : "cooldown_detected",
+        strncpy(notes, triggered ? "auto_spray"
+                                 : (off ? "detected_spray_off" : "cooldown_detected"),
                 sizeof(notes) - 1);
     } else {
-        strncpy(notes, triggered ? "yolo_server_spray" : "yolo_server_detected",
+        strncpy(notes, triggered ? "yolo_server_spray"
+                                 : (off ? "yolo_server_spray_off" : "yolo_server_detected"),
                 sizeof(notes) - 1);
     }
     notes[sizeof(notes) - 1] = '\0';
 
+    /* instance_count is how many feces spots were in the frame. Always >= 1
+     * on a path that reaches here (a zero-count frame is not a detection);
+     * clamped so a stale/zero value can never write a misleading 0-row. */
+    if (instance_count < 1) instance_count = 1;
+
     char url[512];
-    snprintf(url, sizeof(url),
-        "%s?confidence=%.4f&triggered=%d&spray_ms=%u&esp=esp32s3&model=%s&notes=%s",
+    int ulen = snprintf(url, sizeof(url),
+        "%s?confidence=%.4f&triggered=%d&spray_ms=%u&esp=esp32s3&model=%s&notes=%s&count=%u",
         cfg->dash_url, (double)conf, triggered ? 1 : 0, (unsigned)spray_ms,
-        edge_impulse_model_tag(), notes);
+        edge_impulse_model_tag(), notes, (unsigned)instance_count);
+    /* Append the primary box only when there is one: a row without coordinates
+     * must stay NULL in the DB so pre-coordinate history stays distinguishable,
+     * never a fabricated position. */
+    if (ulen > 0 && (size_t)ulen < sizeof(url) && bw > 0.0f && bh > 0.0f) {
+        snprintf(url + ulen, sizeof(url) - (size_t)ulen,
+                 "&x=%.4f&y=%.4f&w=%.4f&h=%.4f",
+                 (double)bx, (double)by, (double)bw, (double)bh);
+    }
 
     esp_http_client_handle_t c;
     char body[128] = "";
@@ -347,7 +438,9 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     if (jpeg == NULL || len == 0) return false;
 
     esp_http_client_handle_t c;
-    char body[1280] = "";
+    /* 2 KB: the multi-instance reply carries up to VERIFY_MAX_FECES_BOXES
+     * normalized boxes (~50 B each) on top of the compact leading fields. */
+    char body[2048] = "";
     body_sink_t sink;
     /* 5 s, not 1.5 s. 1.5 s was tuned on a wired LAN, where the round trip
      * plus a JPEG upload fit comfortably. Over a phone hotspot the RTT sits at
@@ -357,8 +450,23 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
      * longer timeout is that a genuinely dead verifier now stalls this inline
      * detect loop for 5 s per attempt instead of 1.5 s -- acceptable because
      * the server is an *additional* trigger: the on-device FOMO path sprays
-     * with this leg failing indefinitely. */
-    c = prv_client_init(&sink, body, sizeof(body), cfg->verify_url, VERIFY_TIMEOUT_MS);
+     * with this leg failing indefinitely.
+     *
+     * That cost is reduced once the server is KNOWN to be down. The poll
+     * runs inline, so every second spent waiting is a second the detect loop
+     * is not running and the camera frame buffer is not being drained (which
+     * is what the `cam_hal: FB-OVF` messages are -- the driver overruns and
+     * drops frames). With the laptop on a different network the board's ARP
+     * for it never resolves, so the CONNECT alone burns the whole budget on
+     * every attempt.
+     *
+     * s_verify_ok is true until a poll actually fails, so the healthy path
+     * is unchanged: a slow-but-working server is never cut off. Only once a
+     * failure has been recorded does the budget drop to 2 s, which turns a
+     * PC outage from "the loop is blocked ~5 s out of every 9 s" into
+     * "blocked ~2 s out of every 6 s". */
+    int timeout_ms = s_verify_ok ? VERIFY_TIMEOUT_MS : VERIFY_TIMEOUT_MS_FAILED;
+    c = prv_client_init(&sink, body, sizeof(body), cfg->verify_url, timeout_ms);
     if (!c) return false;
 
     char fomo_hdr[16];
@@ -369,10 +477,17 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     esp_http_client_set_header(c, "X-Fomo-Conf", fomo_hdr);
     esp_http_client_set_post_field(c, (const char *)jpeg, len);
 
+    /* Time the whole exchange, not just the result. The elapsed time is what
+     * separates the failure modes that all look identical from the outside:
+     * a transport that died mid-flight, a server that answered too late, and
+     * a response the board never received in full. */
+    int64_t poll_start_ms = esp_timer_get_time() / 1000;
     esp_err_t e = esp_http_client_perform(c);
+    int64_t poll_ms = esp_timer_get_time() / 1000 - poll_start_ms;
     if (e != ESP_OK) {
-        ESP_LOGI(TAG, "verify poll failed: %s (sent %u B, timeout %d ms)",
-                 esp_err_to_name(e), (unsigned)len, VERIFY_TIMEOUT_MS);
+        ESP_LOGI(TAG, "verify poll failed: %s (sent %u B, timeout %d ms, took %lld ms)",
+                 esp_err_to_name(e), (unsigned)len, timeout_ms,
+                 (long long)poll_ms);
         /* Back off so an offline verifier costs one timeout per
          * VERIFY_BACKOFF_MAX_MS instead of stalling every 2 s cycle. Kept short
          * (4 s, was 30 s): a 30 s backoff read as a dead verifier in the UI
@@ -389,7 +504,22 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
          * result. Only a 2xx is a real answer. */
         int status = esp_http_client_get_status_code(c);
         if (status < 200 || status >= 300) {
-            ESP_LOGD(TAG, "verify poll rejected: HTTP %d", status);
+            /* INFO, not DEBUG -- and not optional. This is the only path that
+             * explains a poll the board counted as failed while the server
+             * logged a clean 200: esp_http_client_perform() returns ESP_OK for
+             * a response that never fully arrived, leaving the status code at
+             * 0. A status of 0 is therefore the tell for "the transport died
+             * before a status line showed up" (TCP reset, truncated body),
+             * as opposed to a real HTTP error, which always has a 3-digit
+             * status. The elapsed time separates a reset from a slow server.
+             * At DEBUG level this line never printed -- there is no
+             * esp_log_level_set() anywhere in this firmware, so the default
+             * level is INFO and DEBUG output is compiled out -- which is why
+             * an intermittent failure could not be diagnosed before.
+             * The server answered such a poll in 0.4 s with a 200, so this
+             * path was reached with status 0 and nothing was ever logged. */
+            ESP_LOGI(TAG, "verify poll rejected: HTTP %d (sent %u B, took %lld ms)",
+                     status, (unsigned)len, (long long)poll_ms);
             s_verify_ok = false;
             s_verify_failures++;
             s_verify_retry_ms = esp_timer_get_time() / 1000 + VERIFY_BACKOFF_MAX_MS;
@@ -406,11 +536,27 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
             v.valid = true;
             v.detected = prv_parse_bool_key(body, "detected");
             v.conf = prv_parse_float_key(body, "yolo_conf");
-            if (!prv_parse_box_norm(body, &v.x, &v.y, &v.w, &v.h)) {
+            /* Multi-instance: all target boxes the verifier saw, score
+             * descending. The server caps this array at the same
+             * VERIFY_MAX_FECES_BOXES the firmware holds, so the parsed count
+             * is the full count, not a truncated view. */
+            v.feces_count = (uint8_t)prv_parse_boxes_norm(body, v.feces_boxes,
+                                                          VERIFY_MAX_FECES_BOXES);
+            if (prv_parse_box_norm(body, &v.x, &v.y, &v.w, &v.h)) {
+                /* legacy best-box fields already set from box_norm */
+            } else if (v.feces_count > 0) {
+                v.x = v.feces_boxes[0].x;
+                v.y = v.feces_boxes[0].y;
+                v.w = v.feces_boxes[0].w;
+                v.h = v.feces_boxes[0].h;
+            } else {
                 /* Server saw something but no target box (or the reply was cut
-                 * short); fall back to a centred square so the overlay can
-                 * still show a definite green/red answer. */
-                v.x = 0.3f; v.y = 0.3f; v.w = 0.4f; v.h = 0.4f;
+                 * short). No location exists, so report no location: zeros in
+                 * the legacy fields, never a fabricated centred square. The
+                 * dashboard's label carries the definite green/red answer; a
+                 * fake box here only ever renders as a green square stuck
+                 * dead centre that misleads more than an honest no-position. */
+                v.x = 0.0f; v.y = 0.0f; v.w = 0.0f; v.h = 0.0f;
             }
 
             if (s_verify_mux) xSemaphoreTake(s_verify_mux, portMAX_DELAY);
@@ -419,9 +565,20 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
             if (s_verify_mux) xSemaphoreGive(s_verify_mux);
             last_verify_ok_ms = esp_timer_get_time() / 1000;
 
-            ESP_LOGD(TAG, "verify poll: detected=%d conf=%.3f box=%.2f,%.2f %.2fx%.2f",
-                     (int)v.detected, (double)v.conf, (double)v.x, (double)v.y,
-                     (double)v.w, (double)v.h);
+            /* INFO, not DEBUG, for the same reason as the rejection path:
+             * seeing every ACCEPTED poll with its round-trip time is what
+             * makes an intermittent failure diagnosable. If a failure shows up
+             * in this stream, the last accepted poll before it says whether
+             * the server was already slowing down (round-trip climbing
+             * towards the 5 s timeout) or whether the link simply broke.
+             * The round-trip time is also the only way to tell "the server
+             * answered slowly" apart from "the transport died", since the
+             * server's own log cannot see a response the board never got. */
+            ESP_LOGI(TAG, "verify poll: detected=%d conf=%.3f feces=%u box=%.2f,%.2f %.2fx%.2f (took %lld ms)",
+                     (int)v.detected, (double)v.conf, (unsigned)v.feces_count,
+                     (double)v.x, (double)v.y,
+                     (double)v.w, (double)v.h,
+                     (long long)poll_ms);
 
             /* Server-gated spray. The server only ever reports boxes at or
              * above its own YOLO_CONF (0.25), so `detected` is a necessary but
@@ -459,6 +616,94 @@ static bool prv_poll_verify(const app_config_t *cfg, const uint8_t *jpeg,
     }
     esp_http_client_cleanup(c);
     return triggered;
+}
+
+/* Monotonic id per published detection. It is the actuator board's duplicate
+ * guard, so it must never repeat for two different detections. */
+static uint32_t s_target_detection_id = 0;
+
+/* Minimum gap between two published detections. The detect loop spins far
+ * faster than the camera produces new information (it is paced by inference,
+ * not by the loop), so without this the publisher would fire several times
+ * for the same piece of feces. */
+#define TARGET_PUBLISH_MIN_INTERVAL_MS 2000
+static int64_t s_last_target_publish_ms = 0;
+
+/* Send the detected spots to the external actuator board.
+ *
+ * This does NOT decide whether anything gets sprayed: the camera board
+ * publishes what it saw, and the actuator board decides whether it can act on
+ * it (water, cycle state, servo limits). The camera board's own relay and
+ * local spray path are untouched by any of this.
+ *
+ * The boxes sent are the best available estimate of where the feces IS:
+ *   - the YOLOv8 boxes when the verifier answer is fresh. They are a much
+ *     tighter localisation than the FOMO blob, and they describe a frame from
+ *     one poll ago, which is fine because a spot on the floor does not move.
+ *   - otherwise the on-device FOMO boxes, which are from the live frame.
+ *
+ * A detection that ONLY the verifier saw (FOMO below its dial, YOLOv8 above)
+ * is still published -- that is the case the server-side model exists for.
+ *
+ * The wire format is docs/target-protocol.md. */
+static void prv_publish_target(const fomo_result_t *res)
+{
+    verify_result_t v;
+    detection_service_verify_result(&v);
+
+    bool yolo_fresh = (v.valid && v.feces_count > 0 &&
+                       v.age_ms <= TARGET_YOLO_FRESH_MS);
+    bool fomo_seen = (res != NULL && res->feces_count > 0);
+    if (!yolo_fresh && !fomo_seen) return;
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_target_publish_ms < TARGET_PUBLISH_MIN_INTERVAL_MS) return;
+    s_last_target_publish_ms = now_ms;
+
+    target_box_t boxes[TARGET_MAX_BOXES];
+    uint8_t count = 0;
+    const char *source = "fomo";
+
+    if (yolo_fresh) {
+        for (uint8_t i = 0; i < v.feces_count && i < TARGET_MAX_BOXES; i++) {
+            boxes[count].x = v.feces_boxes[i].x;
+            boxes[count].y = v.feces_boxes[i].y;
+            boxes[count].w = v.feces_boxes[i].w;
+            boxes[count].h = v.feces_boxes[i].h;
+            /* The verifier's reply carries a per-box score, but this firmware's
+             * parser keeps only the headline one. Every YOLO box therefore
+             * carries the same conf -- the best target-class score. */
+            boxes[count].conf = v.conf;
+            count++;
+        }
+        source = "yolo";
+    } else {
+        for (uint8_t i = 0; i < res->feces_count && i < TARGET_MAX_BOXES; i++) {
+            const fomo_box_t *b = &res->feces_boxes[i];
+            /* FOMO stores a centroid; the wire format is a top-left corner,
+             * the same conversion /status applies. */
+            float bx = b->x - b->width / 2.0f;
+            float by = b->y - b->height / 2.0f;
+            if (bx < 0.0f) bx = 0.0f;
+            if (by < 0.0f) by = 0.0f;
+            if (bx + b->width > 1.0f) bx = 1.0f - b->width;
+            if (by + b->height > 1.0f) by = 1.0f - b->height;
+            boxes[count].x = bx;
+            boxes[count].y = by;
+            boxes[count].w = b->width;
+            boxes[count].h = b->height;
+            boxes[count].conf = b->score;
+            count++;
+        }
+    }
+
+    if (count == 0) return;
+
+    uint16_t fw = 0, fh = 0;
+    camera_service_frame_size(&fw, &fh);
+
+    s_target_detection_id++;
+    target_publisher_publish(boxes, count, fw, fh, source, s_target_detection_id);
 }
 
 void detection_service_verify_result(verify_result_t *out)
@@ -563,8 +808,11 @@ static void detection_task(void *arg)
         }
 
         /* Only the feces class may spray or publish. A pig-only frame must
-         * neither trigger the relay nor be logged as a detection. */
-        bool is_feces = res.class_id == EI_CLASS_FECES;
+         * neither trigger the relay nor be logged as a detection. A frame
+         * with ANY feces instance counts, and the spray is issued once per
+         * frame regardless of instance count (the pump has no per-spot
+         * aim; the cooldown already prevents spray spam). */
+        bool is_feces = res.class_id == EI_CLASS_FECES || res.feces_count > 0;
         bool triggered = false;
         if (is_feces) {
             triggered = spray_controller_on_detection(res.score);
@@ -576,7 +824,17 @@ static void detection_task(void *arg)
         if (now_ms - last_cfg_ms >= 5000) {
             app_config_load(&cfg);
             last_cfg_ms = now_ms;
+            /* Push the actuator-board settings to the publisher too, so
+             * pointing the board at a different main ESP32 (or switching
+             * publishing off) takes effect without a reflash. */
+            target_publisher_set_config(cfg.target_url, cfg.target_enabled);
         }
+
+        /* Publish the coordinates to the external actuator board. Independent
+         * of the local spray decision: this board's own relay is unchanged
+         * and still runs on its own logic. The publisher is handed the
+         * detection and does nothing else -- it moves nothing. */
+        prv_publish_target(&res);
 
         /* Report/publish detections (feces class only), on inference frames
          * and throttled by time so backend traffic stays bounded regardless of
@@ -605,8 +863,25 @@ static void detection_task(void *arg)
                 last_verify_ms = esp_timer_get_time() / 1000;
             }
             if (do_report) {
+                /* Primary box for history: fomo_result_t stores x,y as the box
+                 * CENTROID; the wire format (and the DB) is top-left normalized,
+                 * the same conversion /status applies before serializing. */
+                float bx = -1.0f, by = -1.0f, bw = -1.0f, bh = -1.0f;
+                if (res.feces_count > 0) {
+                    const fomo_box_t *b = &res.feces_boxes[0];
+                    bw = b->width;
+                    bh = b->height;
+                    bx = b->x - bw / 2.0f;
+                    by = b->y - bh / 2.0f;
+                    if (bx < 0.0f) bx = 0.0f;
+                    if (by < 0.0f) by = 0.0f;
+                    if (bx + bw > 1.0f) bx = 1.0f - bw;
+                    if (by + bh > 1.0f) by = 1.0f - bh;
+                }
                 long id = prv_post_dashboard(&cfg, res.score, triggered,
-                                             cfg.spray_ms, "fomo");
+                                             cfg.spray_ms, "fomo",
+                                             res.feces_count > 0 ? res.feces_count : 1,
+                                             bx, by, bw, bh);
                 float yolo_conf = prv_post_verify(&cfg, frame_copy, frame_len, res.score);
                 if (id > 0 && yolo_conf >= 0.0f) {
                     prv_post_verify_result(&cfg, id, yolo_conf);
@@ -623,12 +898,37 @@ static void detection_task(void *arg)
              * small GET rather than re-uploading the JPEG. */
             if (server_triggered) {
                 s_detection_count++;
+                verify_result_t v;
+                detection_service_verify_result(&v);
+                /* The verifier's boxes are already top-left normalized (its
+                 * boxes_norm reply); legacy single-box fields mirror box[0]. */
+                const verify_box_t *vb = v.feces_count > 0 ? &v.feces_boxes[0] : NULL;
                 long id = prv_post_dashboard(&cfg, cfg.server_trigger_conf, true,
-                                             cfg.spray_ms, "server");
+                                             cfg.spray_ms, "server",
+                                             v.feces_count > 0 ? v.feces_count : 1,
+                                             vb ? vb->x : v.x, vb ? vb->y : v.y,
+                                             vb ? vb->w : v.w, vb ? vb->h : v.h);
                 if (id > 0) {
-                    verify_result_t v;
-                    detection_service_verify_result(&v);
                     prv_post_verify_result(&cfg, id, v.conf);
+                }
+            } else if (!spray_controller_is_enabled()) {
+                /* Pump off by the operator: a server detection that WOULD have
+                 * sprayed still deserves a history row -- otherwise switching
+                 * off silently erases the only detector that fires in many
+                 * scenes (FOMO sits below its dial). Throttled at the same
+                 * reporting cadence so it cannot spam one row per verify poll. */
+                verify_result_t v;
+                detection_service_verify_result(&v);
+                uint64_t now_ms2 = esp_timer_get_time() / 1000;
+                if (v.detected && (now_ms2 - last_report_ms) >= REPORT_MIN_INTERVAL_MS) {
+                    s_detection_count++;
+                    last_report_ms = now_ms2;
+                    const verify_box_t *vb = v.feces_count > 0 ? &v.feces_boxes[0] : NULL;
+                    long id = prv_post_dashboard(&cfg, v.conf, false, 0, "server",
+                                                 v.feces_count > 0 ? v.feces_count : 1,
+                                                 vb ? vb->x : v.x, vb ? vb->y : v.y,
+                                                 vb ? vb->w : v.w, vb ? vb->h : v.h);
+                    if (id > 0) prv_post_verify_result(&cfg, id, v.conf);
                 }
             }
         }
@@ -640,6 +940,9 @@ static void detection_task(void *arg)
 esp_err_t detection_service_start(void)
 {
     s_verify_mux = xSemaphoreCreateMutex();
+    /* The actuator-board publisher runs on its own task so a slow or dead
+     * main ESP32 can never stretch the detection loop. */
+    target_publisher_init();
     /* 12 KB: this task parses HTTP replies (a 1.2 KB body buffer) and logging a
      * parsed reply goes through vprintf, which is not cheap on the stack. */
     xTaskCreatePinnedToCore(detection_task, "detect", 12288, NULL, 5, NULL, 1);

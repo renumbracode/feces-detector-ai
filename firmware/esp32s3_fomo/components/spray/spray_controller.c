@@ -38,6 +38,11 @@ static uint64_t s_alert_stop_us = 0;
  * the LED and buzzer are driven active-high regardless. */
 static bool s_relay_active_low = true;
 
+/* Operator kill switch for automatic sprays (NVS-backed via app_config; the
+ * boot path applies the stored value). Manual force_spray() is never gated --
+ * the switch must not take water control away from an explicit operator act. */
+static bool s_enabled = true;
+
 /* The GPIO level that leaves the relay de-energised, derived from polarity.
  * Used at init and after a polarity change so the pump is never left on. */
 static uint32_t prv_relay_off_level(void)
@@ -235,6 +240,15 @@ bool spray_controller_trigger_external(float confidence, float min_confidence,
      * YOLOv8 score is on a different scale from the on-device FOMO score, so
      * comparing it against the FOMO dial would be meaningless. */
     if (confidence < min_confidence) return false;
+
+    /* Kill switch: same alert-only refusal as the FOMO path. Without this the
+     * server leg would keep spraying while the operator believes the pump is
+     * off -- the switch gates BOTH detector paths, not just the local one. */
+    if (!s_enabled) {
+        prv_alert_on(ALERT_MS);
+        return false;
+    }
+
     if (s_spraying) return false;
 
     /* Shares the cooldown with the FOMO path on purpose: both models looking at
@@ -255,6 +269,15 @@ bool spray_controller_on_detection(float confidence)
 
     /* Below the confidence dial this is not an actionable detection. */
     if (confidence < s_threshold) return false;
+
+    /* Kill switch: an actionable detection still ALERTS (LED + buzzer) and is
+     * still logged upstream -- it simply never energises the relay. This mirrors
+     * the cooldown path: the pump is rate-limited/disabled, the operator is
+     * still told about the feces. */
+    if (!s_enabled) {
+        prv_alert_on(ALERT_MS);
+        return false;
+    }
 
     /* A spray is already running: that running spray *is* this detection's
      * response, and the LED and buzzer are already lit. Re-triggering here
@@ -277,6 +300,8 @@ bool spray_controller_on_detection(float confidence)
 
 bool spray_controller_force_spray(uint32_t duration_ms)
 {
+    /* Manual override by an explicit operator act: NOT gated by s_enabled.
+     * The kill switch refuses automatic sprays, not requested ones. */
     if (duration_ms == 0) duration_ms = s_spray_ms;
     if (s_spraying) return false;
     prv_turn_on(duration_ms);
@@ -320,4 +345,30 @@ void spray_controller_set_relay_polarity(bool active_low)
      * that is a 1, which is exactly the energised level. */
     if (s_relay_pin >= 0) gpio_set_level(s_relay_pin, prv_relay_off_level());
     ESP_LOGI(TAG, "relay IN polarity: %s", s_relay_active_low ? "active-low" : "active-high");
+}
+
+void spray_controller_set_enabled(bool on)
+{
+    if (on == s_enabled) return;
+    s_enabled = on;
+
+    if (!on) {
+        ESP_LOGW(TAG, "spray DISABLED: automatic sprays refused (manual override still works)");
+        /* Kill switch means water stops NOW: a spray already running is cut
+         * mid-cycle exactly the way spray_task ends one normally. */
+        if (s_spraying) {
+            s_spraying = false;
+            s_spray_stop_us = 0;
+            s_last_spray_end_us = esp_timer_get_time();
+            prv_relay(false);
+            ESP_LOGW(TAG, "in-progress spray CUT by the switch; cooldown window started");
+        }
+    } else {
+        ESP_LOGI(TAG, "spray ENABLED: automatic sprays resume");
+    }
+}
+
+bool spray_controller_is_enabled(void)
+{
+    return s_enabled;
 }

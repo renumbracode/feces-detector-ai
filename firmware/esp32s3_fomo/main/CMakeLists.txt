@@ -9,6 +9,7 @@ idf_component_register(
         "../components/spray/include"
         "../components/http_server/include"
         "../components/detection_service/include"
+        "../components/target_publisher/include"
     PRIV_REQUIRES
         nvs_flash
         esp_wifi
@@ -26,4 +27,5 @@ idf_component_register(
         spray
         http_server
         detection_service
+        target_publisher
 )
