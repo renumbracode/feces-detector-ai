@@ -49,7 +49,19 @@ Returns:
 | Env var | Default |
 |---|---|
 | `YOLO_MODEL` | `<repo>/training/runs/detect/weights/best.pt` |
-| `YOLO_CONF` | `0.25` |
+| `YOLO_CONF` | `0.15` |
+| `YOLO_NMS_IOU` | `0.45` |
+| `YOLO_MAX_TARGET_BOXES` | `4` |
+
+`YOLO_CONF` is the floor for **reporting** a detection, not the spray gate --
+the board's own `server_trigger_conf` decides that. It is 0.15 rather than the
+old 0.25 because this model's feces class is weak (mAP50 15.1%), so a real
+blob scores 0.15-0.45; at a 0.25 floor the server reported "no feces" for
+frames where the blob was plainly visible.
+
+Inference runs at the model's native `imgsz=640` (the camera uploads 640x480).
+An earlier 416px downscale bought no speed but halved the confidence, because
+Ultralytics letterboxes the image back up to 640 for inference.
 
 ## Integration
 

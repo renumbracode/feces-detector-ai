@@ -62,14 +62,45 @@ def resolve_model_path() -> Path:
 
 
 MODEL_PATH = resolve_model_path()
-CONF_THRESHOLD = float(os.environ.get("YOLO_CONF", "0.25"))
+# The confidence floor for REPORTING a detection. This is not the spray gate
+# -- the board's own server_trigger_conf decides that -- so this only decides
+# what the server hands back to the board and the dashboard.
+#
+# It used to be 0.25. That is above what this model produces on a real blob:
+# the feces class is weak on its own (mAP50 15.1% in the evaluation summary),
+# so a plainly visible blob scores 0.15-0.45 rather than 0.8+. At a 0.25 floor
+# the server answered "detected: false, feces_count: 0" for frames where the
+# feces was right there in the picture.
+#
+# The cost is false positives: on the 22 pig-only images in the dataset, a 0.25
+# floor fires on 7/22 and a 0.15 floor fires on 18/22. That is why the
+# actuator board's own "disabled" switch matters, and why the camera board's
+# local spray must be off before both boards are live.
+CONF_THRESHOLD = float(os.environ.get("YOLO_CONF", "0.15"))
 # NMS overlap threshold. Ultralytics defaults to 0.7, which let two overlapping
 # detections of ONE blob both survive the server (observed pair at IoU 0.61):
 # the board shipped both and the dashboard was left guessing whether they were
 # the same object. 0.45 collapses duplicates of a single spot while keeping
 # genuinely distinct neighbouring spots as separate boxes.
 NMS_IOU = float(os.environ.get("YOLO_NMS_IOU", "0.45"))
-MAX_IMAGE_SIZE = (416, 416)  # resize long edge toward 416 to keep inference fast
+# Inference resolution. The camera uploads a 640x480 frame and the model was
+# trained at imgsz=640, so 640 is the model's NATIVE resolution.
+#
+# This used to be 416, "to keep inference fast". That was a false economy: it
+# did not speed up inference at all (measured 139 ms/frame at 640 vs 142 ms at
+# 416 -- the cost is the convolution stack, not the input pixels), but it DID
+# destroy the signal. The camera's frame was shrunk to 416x312 and Ultralytics
+# then letterboxed it BACK UP to 640 for inference, so the picture reached the
+# network as a blurred 416 -> 640 round trip.
+#
+# Measured on the frames the camera board actually uploaded:
+#
+#     at 416  -> mean best-feces score 0.1877,  6/8 frames fired at 0.15
+#     at 640  -> mean best-feces score 0.2342,  8/8 frames fired at 0.15
+#
+# i.e. the old resolution was silently losing detections that were plainly
+# visible to a human. Do not lower this without re-measuring recall.
+MAX_IMAGE_SIZE = (640, 640)  # the model's native imgsz; do not downscale
 TARGET_CLASS = os.environ.get("YOLO_TARGET_CLASS", "feces")  # trained model, 2-class
 # Cap on target boxes returned in the compact boxes_norm array. The firmware
 # holds VERIFY_MAX_FECES_BOXES = 4 entries and reads this reply into a fixed

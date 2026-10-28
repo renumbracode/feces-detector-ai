@@ -407,6 +407,76 @@ and comparing the outputs, before anything was flashed. The solver is a pure
 function precisely so it can be checked; `GET /selftest` on the main board
 runs the same assertions on the real target.
 
+## Detection was broken by the verifier, not by the model — 2026-10-29
+
+**The symptom:** feces pointed at the camera, the board reported
+`detected: false`, `feces_count: 0`, and nothing sprayed. The multi-box
+code was fine the whole time; **two lines in `server/yolo_verify/app.py`
+were silently discarding every detection.**
+
+### 1. `MAX_IMAGE_SIZE` was 416, and that halved the confidence
+
+The camera uploads a **640x480** JPEG. The server resized it to 416x312,
+and Ultralytics then **letterboxed it back up to 640** for inference — so
+the picture reached the network as a blurred 416 -> 640 round trip.
+
+The comment said "to keep inference fast". **It bought no speed at all:**
+measured 139 ms/frame at 640 vs 142 ms at 416 (the cost is the convolution
+stack, not the input pixels). It only destroyed signal. Measured on the
+frames the board actually uploaded:
+
+| | 416 (old) | 640 (fixed) |
+|---|---|---|
+| mean best-feces score | 0.1877 | **0.2342** |
+| frames firing at 0.15 | 6/8 | **8/8** |
+
+640 is also the model's native `imgsz` (see `training/runs/detect/args.yaml`).
+
+### 2. `YOLO_CONF` was 0.25, above what this model produces
+
+The feces class is weak on its own — **mAP50 15.1%** (`evaluation_summary.txt`)
+against a 73.3% for pig. A plainly visible blob scores **0.15-0.45**, not
+0.8+. So a 0.25 floor answered "no feces" for frames where the blob was
+right there in the picture. It is now **0.15**.
+
+`YOLO_CONF` is the floor for *reporting* a detection. **It is not the spray
+gate** — that is the board's own `server_trigger_conf` (now 0.20). The
+false-positive cost is real and is why the actuator board's `disabled`
+switch and the camera board's local spray switch matter: on the 22 pig-only
+dataset images, a 0.25 floor fires on 7/22 and 0.15 fires on 18/22.
+
+### The lesson
+
+**`boxes_norm` being empty is not evidence the model found nothing.** The
+server had a floor, and the model was below it. To tell "the model saw
+nothing" from "the server dropped what the model saw", score the frame
+offline at a low threshold and compare — that is what found this. The
+device's own log is the other half of the story: `verify poll: detected=1
+conf=0.260 feces=2` in the serial log while `/status` showed zeros was the
+tell that the *reporting* layer, not the detector, was at fault.
+
+Note that `/status` on the camera board reports `vrf.*` from the last
+*accepted* poll, and opening the serial port **resets the board** (the
+USB-Serial/JTAG bridge drives EN from DTR/RTS). Reading the log
+therefore reboots it, and the first `/status` afterwards shows zeros until
+the next poll lands.
+
+### The actuator board moved address
+
+It is now **192.168.254.111**, not `.112` (DHCP). The camera board's
+`target_url` and the dashboard's `settings.target_url` must both be
+`http://192.168.254.111:8080/target`.
+
+**Two bugs in that URL, both fixed.** The port was in the *path*
+(`/8080/target` instead of `:8080`), and the firmware **percent-encodes
+the URL the dashboard sends and never decodes it**
+(`http_server_service.c:333` uses `httpd_query_key_value`, which does not
+decode), so the stored value became `http%3A%2F%2F...` and the HTTP client
+rejected it: `Error parse url` -> `cannot create client for ...`. The
+dashboard sends `rawurlencode()`d URLs (`Control.php:55`) and `POST /config`
+decodes them (`prv_get_decoded`) but `GET /target` does not. The stored
+value now reads back unencoded.
+
 ## Laptop-side services (do not survive a reboot)
 
 **Verifier** — start it first, every session:
