@@ -3,6 +3,13 @@
    Dark sidebar + light content, emerald accent. Self-contained (no CDN).
    ========================================================================== */
 
+/* The `hidden` attribute has to WIN over the display rules the components
+   set. The browser's own [hidden] rule is weaker than any class selector,
+   so a .btn (display: inline-flex) stayed on screen while the markup said
+   hidden -- which is how "Save calibration" ended up next to "Calibrate
+   pen" on a page that was not calibrating anything. */
+[hidden] { display: none !important; }
+
 /* ---- design tokens ---- */
 :root {
   --bg: #f4f6f9;
@@ -340,7 +347,9 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .live-badge { position: absolute; top: 14px; left: 14px; }
 /* Graph-paper grid over the live frame. Lines are drawn with CSS gradients
  * sized in %, so the grid matches the displayed image at any stream size
- * and needs no DOM per line. Detection boxes (z-index 2) sit on top. */
+ * and needs no DOM per line. Detection boxes (z-index 2) sit on top.
+ * This is the FALLBACK grid, shown until the pen is calibrated; once it is,
+ * the canvas below draws the pen's real grid in centimetres. */
 .grid-overlay {
   position: absolute;
   inset: 0;
@@ -354,6 +363,25 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
     linear-gradient(to bottom, transparent calc(50% - 1px), rgba(203, 213, 225, 0.6) 50%, transparent calc(50% + 1px));
   background-size: 10% 10%, 10% 10%, 100% 100%, 100% 100%;
 }
+/* The calibrated grid. A canvas, not CSS gradients: the camera sees the pen
+ * from one end, so the real gridlines converge in the picture, and only a
+ * projected drawing can show that honestly. */
+.grid-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  border-radius: inherit;
+}
+.live-stage.pen-calibrated .grid-canvas { display: block; }
+.live-stage.pen-calibrated .grid-overlay,
+.live-stage.pen-calibrated .axis-labels { display: none; }
+/* While calibrating, the picture is a target: the clicks land on it. */
+.live-stage.calibrating { cursor: crosshair; }
+.live-stage.calibrating img { filter: brightness(0.75); }
 /* Axis tick numbers (0..100), positioned by JS at % offsets of the stage. */
 .axis-labels { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .axis-labels span {
@@ -380,6 +408,25 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
   border-radius: 4px;
   padding: 5px 8px;
   pointer-events: none;
+}
+/* The second line of the HUD: the raw picture scales, under the centimetres. */
+#coord-readout .sub {
+  margin-top: 3px;
+  font-weight: 400;
+  font-size: 9px;
+  color: #94a3b8;
+}
+/* Pen calibration controls. */
+.calib-panel { margin-top: 14px; }
+.calib-hint {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(8, 47, 73, 0.35);
+  border-radius: 6px;
+  color: #bae6fd;
+  font-size: 12px;
+  line-height: 1.45;
 }
 /* .detect-box: one overlay per feces instance (multi-instance detection).
  * #detect-box stays the primary/labelled box so old markup keeps working. */

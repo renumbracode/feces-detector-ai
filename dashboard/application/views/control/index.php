@@ -103,7 +103,47 @@ defined('BASEPATH') OR exit('No direct script access allowed');
           <label for="threshold">Detection threshold (0.00 – 1.00)</label>
           <input id="threshold" type="number" name="threshold" min="0" max="1" step="0.05" value="<?= htmlspecialchars($settings['threshold']) ?>">
         </div>
+        <div class="field">
+          <label for="pen_width_cm">Pen width (cm)</label>
+          <input id="pen_width_cm" type="number" name="pen_width_cm" min="1" max="500" step="0.5" value="<?= htmlspecialchars($settings['pen_width_cm']) ?>">
+          <div class="hint">across the pen, as the camera sees it</div>
+        </div>
+        <div class="field">
+          <label for="pen_length_cm">Pen length (cm)</label>
+          <input id="pen_length_cm" type="number" name="pen_length_cm" min="1" max="500" step="0.5" value="<?= htmlspecialchars($settings['pen_length_cm']) ?>">
+          <div class="hint">along the pen, from the camera's end toward the sprayer</div>
+        </div>
+        <div class="field">
+          <label for="grid_step_cm">Grid spacing (cm)</label>
+          <input id="grid_step_cm" type="number" name="grid_step_cm" min="0.5" max="50" step="0.5" value="<?= htmlspecialchars($settings['grid_step_cm']) ?>">
+          <div class="hint">how far apart the centimetre gridlines sit</div>
+        </div>
+        <div class="field">
+          <label for="pen_flip_y">Camera end of the picture</label>
+          <select id="pen_flip_y" name="pen_flip_y">
+            <option value="0"<?= ($settings['pen_flip_y'] === '1') ? '' : ' selected' ?>>At the bottom</option>
+            <option value="1"<?= ($settings['pen_flip_y'] === '1') ? ' selected' : '' ?>>At the top</option>
+          </select>
+          <div class="hint">which end of the picture the camera is at. The pen's 0 cm is that end.</div>
+        </div>
+        <div class="field">
+          <label for="actuator_config_url">Actuator board settings URL</label>
+          <input id="actuator_config_url" type="text" name="actuator_config_url" value="<?= htmlspecialchars($settings['actuator_config_url']) ?>" placeholder="http://192.168.1.10:8080/config">
+          <div class="hint">where the pen calibration is pushed to. Leave blank to work it out from the actuator board's target URL.</div>
+        </div>
       </div>
+      <p class="muted" style="margin-top:12px">
+        The camera looks straight down at the pen, so the picture <em>is</em> the pen:
+        the centimetres on the live view and in the history table come straight from the pen's
+        size above, with no fitting to do.
+        <?php if (!empty($settings['pen_calibrated'])): ?>
+          The pen is additionally <strong>fitted to the picture</strong>, which is what a camera
+          that is not square-on needs.
+        <?php endif; ?>
+        <?php if (!empty($settings['actuator_config_effective'])): ?>
+          The calibration is pushed to <code><?= htmlspecialchars($settings['actuator_config_effective']) ?></code>.
+        <?php endif; ?>
+      </p>
       <div class="row" style="margin-top:16px">
         <button class="btn btn-primary" type="submit">Save settings</button>
       </div>

@@ -62,6 +62,33 @@ class Api extends MY_Controller
             }
         }
 
+        /* The same box in centimetres on the pen, when the pen has been
+         * calibrated. The normalized columns stay the canonical record: this
+         * is a snapshot taken now, so re-calibrating the pen later never
+         * rewrites what a past detection meant.
+         *
+         * The device sends the frame size it published from, because the
+         * sensor can clamp the framesize away from the 640x480 we asked for.
+         * If the picture no longer has the shape the calibration was fitted
+         * against, every centimetre would be wrong -- so the row keeps NULL
+         * instead of carrying a number nobody should trust. */
+        $cmBox = ['x' => null, 'y' => null, 'w' => null, 'h' => null];
+        if ($box['x'] !== null) {
+            $this->load->library('Pen_calibration');
+            $pen = $this->pen_calibration;
+            if ($pen->is_calibrated()) {
+                $fw = (isset($_GET['fw']) && is_numeric($_GET['fw'])) ? (int) $_GET['fw'] : 0;
+                $fh = (isset($_GET['fh']) && is_numeric($_GET['fh'])) ? (int) $_GET['fh'] : 0;
+                if ($pen->aspect_matches($fw, $fh)) {
+                    $c = $pen->box_to_cm($box['x'], $box['y'], $box['w'], $box['h']);
+                    if ($c !== null) {
+                        $cmBox = ['x' => round($c['x'], 2), 'y' => round($c['y'], 2),
+                                  'w' => round($c['w'], 2), 'h' => round($c['h'], 2)];
+                    }
+                }
+            }
+        }
+
         if ($confidence < 0 || $confidence > 1) {
             $this->output->set_status_header(400);
             $this->output->set_output(json_encode(['ok' => false, 'error' => 'confidence out of range']));
@@ -76,7 +103,7 @@ class Api extends MY_Controller
             $verified = 1;
         }
 
-        $id = $this->Detection_model->insert([
+        $row = [
             'confidence'      => $confidence,
             'triggered'       => $triggered,
             'spray_duration'  => $sprayMs,
@@ -90,9 +117,154 @@ class Api extends MY_Controller
             'h'               => $box['h'],
             'yolo_conf'       => $yoloConf,
             'verified'        => $verified,
-        ]);
+        ];
+
+        /* The centimetre columns only exist once the table has been
+         * migrated. An install that has not run the ALTER yet still logs
+         * detections normally -- it just does not get the centimetres. */
+        if ($this->db->field_exists('x_cm', 'detections')) {
+            $row['x_cm'] = $cmBox['x'];
+            $row['y_cm'] = $cmBox['y'];
+            $row['w_cm'] = $cmBox['w'];
+            $row['h_cm'] = $cmBox['h'];
+        }
+
+        $id = $this->Detection_model->insert($row);
 
         $this->output->set_output(json_encode(['ok' => true, 'id' => $id]));
+    }
+
+    /**
+     * POST /api/calibrate — store, or clear, the pen calibration.
+     *
+     * The operator clicks the four corners of the pen in the live view; the
+     * browser fits the homography to them and sends the eight numbers. The
+     * server only validates and stores them: solving it here would mean
+     * solving it twice, and the browser can show the operator what the fit
+     * looks like BEFORE it is committed.
+     *
+     * An empty matrix clears the calibration, which puts the live view back
+     * on its plain percentage grid.
+     */
+    public function calibrate()
+    {
+        $this->load->library('Pen_calibration');
+
+        $raw = trim((string) $this->input->post('h'));
+        if ($raw === '') {
+            $this->Setting_model->set('pen_homography', '');
+            $this->output->set_output(json_encode(['ok' => true, 'cleared' => true]));
+            return;
+        }
+
+        $h = Pen_calibration::parse_matrix($raw);
+        if ($h === null) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the calibration needs eight numbers']));
+            return;
+        }
+        /* A matrix that cannot be inverted describes points that are in a
+         * line, or two corners on the same spot. */
+        if (Pen_calibration::invert($h) === null) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'those four points do not describe a pen -- click the corners again']));
+            return;
+        }
+
+        $widthCm = (float) $this->input->post('width_cm');
+        $lengthCm = (float) $this->input->post('length_cm');
+        if ($widthCm < 1 || $widthCm > 500 || $lengthCm < 1 || $lengthCm > 500) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the pen size must be between 1 and 500 cm']));
+            return;
+        }
+
+        $this->Setting_model->set('pen_homography', Pen_calibration::format_matrix($h));
+        $this->Setting_model->set('pen_width_cm', (string) round($widthCm, 2));
+        $this->Setting_model->set('pen_length_cm', (string) round($lengthCm, 2));
+
+        /* The shape of the picture the fit was made against. Rows published
+         * from a differently shaped frame are refused their centimetres. */
+        $aspect = (float) $this->input->post('aspect');
+        $this->Setting_model->set('pen_calib_aspect', $aspect > 0 ? (string) round($aspect, 6) : '');
+
+        $this->output->set_output(json_encode(['ok' => true, 'h' => $h]));
+    }
+
+    /**
+     * POST /api/push_calibration — send the pen calibration to the actuator
+     * board.
+     *
+     * The board that owns the servos is the one that has to aim, so it
+     * needs the calibration the dashboard fitted to the pen's corners: it
+     * cannot work that out itself, because it never sees the picture.
+     *
+     * Only the matrix and the pen's size are sent. The nozzle's pose and
+     * the servo's offsets are the board's own business and stay where the
+     * operator set them on its setup page -- overwriting them from here
+     * would quietly undo a physical adjustment.
+     */
+    public function push_calibration()
+    {
+        $this->load->library('Pen_calibration');
+        $pen = $this->pen_calibration;
+
+        if (!$pen->is_calibrated()) {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the pen\'s size is not set, so there is nothing to tell the board']));
+            return;
+        }
+
+        $url = $this->actuator_config_url();
+        if ($url === '') {
+            $this->output->set_status_header(400);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the actuator board\'s address is not known -- set it on the Control page']));
+            return;
+        }
+
+        $body = http_build_query([
+            'pen_ok' => '1',
+            'pen_w'  => $pen->width_cm(),
+            'pen_l'  => $pen->length_cm(),
+            'pen_flip_y' => $pen->flip_y() ? '1' : '0',
+        ]);
+
+        /* The matrix goes too, but only when there is one. Without it the
+         * board uses the plain model, which is what the pen's size alone
+         * describes. */
+        if ($pen->is_fitted()) {
+            $body .= '&' . http_build_query([
+                'pen_h' => Pen_calibration::format_matrix($pen->matrix()),
+            ]);
+        }
+
+        $reply = $this->http_post_form($url, $body);
+        if ($reply === null) {
+            $this->output->set_status_header(502);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the actuator board at ' . $url . ' did not answer']));
+            return;
+        }
+
+        /* The board answers with JSON, and says whether it saved. */
+        $j = json_decode($reply, true);
+        if (is_array($j) && isset($j['ok']) && !$j['ok']) {
+            $this->output->set_status_header(502);
+            $this->output->set_output(json_encode(
+                ['ok' => false, 'error' => 'the actuator board refused it: ' . (isset($j['error']) ? $j['error'] : 'no reason given')]));
+            return;
+        }
+
+        $this->output->set_output(json_encode([
+            'ok' => true,
+            'url' => $url,
+            'note' => 'The actuator board restarts when its settings change.',
+        ]));
     }
 
     /** GET /api/status — proxy the ESP32-S3 /status JSON to the dashboard JS. */

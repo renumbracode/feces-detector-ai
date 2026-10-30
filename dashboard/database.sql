@@ -24,6 +24,19 @@ CREATE TABLE IF NOT EXISTS detections (
     y DECIMAL(5,4) NULL,
     w DECIMAL(5,4) NULL,
     h DECIMAL(5,4) NULL,
+    -- The same box in CENTIMETRES on the pen, when the pen has been
+    -- calibrated (see the pen_homography setting). x_cm/y_cm place the
+    -- box's top-left corner, the same corner the normalized columns
+    -- describe; w_cm/h_cm are the box's extent along the pen's two axes.
+    --
+    -- These are a SNAPSHOT taken when the row was written, so re-calibrating
+    -- the pen later never rewrites what a past detection meant. NULL means
+    -- "not known": the pen was not calibrated, or the picture's shape had
+    -- changed. A made-up number would be worse than none.
+    x_cm DECIMAL(8,2) NULL,
+    y_cm DECIMAL(8,2) NULL,
+    w_cm DECIMAL(8,2) NULL,
+    h_cm DECIMAL(8,2) NULL,
     -- YOLOv8 verification columns (filled by the Python verify server)
     yolo_conf DECIMAL(5,4) NULL,                        -- YOLOv8 max confidence
     verified TINYINT(1) NOT NULL DEFAULT 0,             -- 1 = cross-checked by YOLOv8
@@ -81,6 +94,10 @@ CREATE TABLE IF NOT EXISTS target_dispatches (
 --     ADD COLUMN y DECIMAL(5,4) NULL AFTER x,
 --     ADD COLUMN w DECIMAL(5,4) NULL AFTER y,
 --     ADD COLUMN h DECIMAL(5,4) NULL AFTER w;
+-- ALTER TABLE detections ADD COLUMN x_cm DECIMAL(8,2) NULL AFTER h,
+--     ADD COLUMN y_cm DECIMAL(8,2) NULL AFTER x_cm,
+--     ADD COLUMN w_cm DECIMAL(8,2) NULL AFTER y_cm,
+--     ADD COLUMN h_cm DECIMAL(8,2) NULL AFTER w_cm;
 
 CREATE TABLE IF NOT EXISTS settings (
     `key` VARCHAR(50) PRIMARY KEY,
@@ -97,6 +114,25 @@ INSERT INTO settings (`key`, `value`) VALUES
     ('threshold', '0.60'),
     ('target_url', ''),                    -- main ESP32 POST /target (empty = off)
     ('target_enabled', '0')                -- mirror of the device's own switch
+    -- The pen, which is the calibration target. The camera looks straight
+    -- down at it, so the picture IS the pen: every centimetre in the
+    -- picture is the same size as every other one, and the pen's size is
+    -- all that is needed to turn a position into centimetres.
+    --   pen_width_cm  -- across the pen, cm
+    --   pen_length_cm -- along the pen, cm
+    --   pen_flip_y    -- 1 when the camera is at the TOP of the picture
+    --   pen_homography -- a fit to the picture, for a camera that is not
+    --                   square-on. Empty means the plain model applies.
+    --   pen_calib_aspect -- width/height of the picture a fit was made
+    --                      against, so a differently shaped picture is
+    --                      refused its centimetres instead of mis-scaled
+    --   grid_step_cm  -- how far apart the centimetre gridlines are
+    ('pen_width_cm', '20'),
+    ('pen_length_cm', '30'),
+    ('pen_flip_y', '0'),
+    ('pen_homography', ''),
+    ('pen_calib_aspect', ''),
+    ('grid_step_cm', '5')
 ON DUPLICATE KEY UPDATE `key` = `key`;
 
 -- Default single-camera deployment (Pen A, overhead mount). Extra cameras

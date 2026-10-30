@@ -12,4 +12,6 @@ $route['api/latest'] = 'api/latest';
 $route['api/insert'] = 'api/insert';
 $route['api/verify'] = 'api/verify';
 $route['api/status'] = 'api/status';
+$route['api/calibrate'] = 'api/calibrate';
+$route['api/push_calibration'] = 'api/push_calibration';
 $route['api/cameras'] = 'api/cameras';

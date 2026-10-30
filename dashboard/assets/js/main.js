@@ -502,7 +502,385 @@
     setInterval(tick, interval || 10000);
   }
 
-  window.__dash = { toast, initStatusPoll, initDashboardRefresh, fecesSignal, createAlerter };
+  /* ----- pen calibration -----
+   *
+   * The pen is a known 20 x 30 cm rectangle in the picture, so four corners
+   * are enough to fit the mapping between the image and the pen floor. The
+   * camera sits at one end and the sprayer at the other, so the floor is seen
+   * in perspective: a flat "pixels to centimetres" factor would be out by up
+   * to a factor of two across the pen. A homography is exact, and it needs no
+   * camera height, no tilt angle and no lens field of view to be guessed.
+   *
+   * The matrix maps pen centimetres to a fraction of the image and has eight
+   * free terms -- the ninth is fixed at 1, which is what makes the system
+   * linear and solvable. The server stores those eight numbers and only ever
+   * applies them, so the fit happens once, in the browser, where the operator
+   * can see it.
+   */
+  const penCalibration = {
+    /* Fit the matrix to four point pairs {from:[X,Y] cm, to:[u,v] fraction}. */
+    solve: function (pairs) {
+      if (!pairs || pairs.length < 4) return null;
+      /* Two rows per correspondence: the u equation and the v equation. */
+      const m = [];
+      for (const p of pairs) {
+        const X = p.from[0], Y = p.from[1], u = p.to[0], v = p.to[1];
+        m.push([X, Y, 1, 0, 0, 0, -u * X, -u * Y, u]);
+        m.push([0, 0, 0, X, Y, 1, -v * X, -v * Y, v]);
+      }
+      const n = m.length;
+      /* Gauss-Jordan with partial pivoting. */
+      for (let col = 0; col < 8; col++) {
+        let piv = col;
+        for (let r = col + 1; r < n; r++) {
+          if (Math.abs(m[r][col]) > Math.abs(m[piv][col])) piv = r;
+        }
+        /* A vanishing pivot means the points are degenerate -- four corners
+         * in a line, or two of them on the same spot. */
+        if (Math.abs(m[piv][col]) < 1e-12) return null;
+        if (piv !== col) { const t = m[piv]; m[piv] = m[col]; m[col] = t; }
+        for (let r = 0; r < n; r++) {
+          if (r === col) continue;
+          const f = m[r][col] / m[col][col];
+          if (f === 0) continue;
+          for (let c = col; c <= 8; c++) m[r][c] -= f * m[col][c];
+        }
+      }
+      const h = [];
+      for (let r = 0; r < 8; r++) h.push(m[r][8] / m[r][r]);
+      return h;
+    },
+
+    /* Pen centimetres -> image fraction. */
+    cmToImage: function (h, X, Y) {
+      if (!h) return null;
+      const w = h[6] * X + h[7] * Y + 1;
+      if (Math.abs(w) < 1e-9) return null;
+      return [(h[0] * X + h[1] * Y + h[2]) / w, (h[3] * X + h[4] * Y + h[5]) / w];
+    },
+
+    /* The inverse matrix, as eight numbers with the bottom-right term at 1.
+     * Same adjugate the server uses, so the two agree exactly. */
+    invert: function (h) {
+      if (!h || h.length !== 8) return null;
+      const m00 = h[0], m01 = h[1], m02 = h[2];
+      const m10 = h[3], m11 = h[4], m12 = h[5];
+      const m20 = h[6], m21 = h[7], m22 = 1;
+      const c00 = m11 * m22 - m12 * m21;
+      const c01 = -(m10 * m22 - m12 * m20);
+      const c02 = m10 * m21 - m11 * m20;
+      const c10 = -(m01 * m22 - m02 * m21);
+      const c11 = m00 * m22 - m02 * m20;
+      const c12 = -(m00 * m21 - m01 * m20);
+      const c20 = m01 * m12 - m02 * m11;
+      const c21 = -(m00 * m12 - m02 * m10);
+      const c22 = m00 * m11 - m01 * m10;
+      const adj = [[c00, c10, c20], [c01, c11, c21], [c02, c12, c22]];
+      const det = m00 * c00 + m01 * c01 + m02 * c02;
+      if (Math.abs(det) < 1e-12) return null;
+      const inv = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (let r = 0; r < 3; r++) {
+        for (let c = 0; c < 3; c++) inv[r][c] = adj[r][c] / det;
+      }
+      const k = inv[2][2];
+      if (Math.abs(k) < 1e-12) return null;
+      for (let r = 0; r < 3; r++) {
+        for (let c = 0; c < 3; c++) inv[r][c] /= k;
+      }
+      return [inv[0][0], inv[0][1], inv[0][2],
+              inv[1][0], inv[1][1], inv[1][2],
+              inv[2][0], inv[2][1]];
+    },
+
+    /* Image fraction -> pen centimetres. */
+    imageToCm: function (inv, u, v) {
+      if (!inv) return null;
+      const w = inv[6] * u + inv[7] * v + 1;
+      if (Math.abs(w) < 1e-9) return null;
+      return [(inv[0] * u + inv[1] * v + inv[2]) / w, (inv[3] * u + inv[4] * v + inv[5]) / w];
+    },
+
+    /* A normalized box (top-left) -> centimetres on the pen. x/y place the
+     * box's top-left corner; w/h are its extent along the pen's two axes,
+     * which in perspective is the axis-aligned envelope of the four
+     * projected corners rather than a rectangle. */
+    boxToCm: function (inv, x, y, w, h) {
+      if (!inv) return null;
+      const cs = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map((c) =>
+        penCalibration.imageToCm(inv, c[0], c[1]));
+      if (cs.some((p) => !p)) return null;
+      const xs = cs.map((p) => p[0]);
+      const ys = cs.map((p) => p[1]);
+      const tl = penCalibration.imageToCm(inv, x, y);
+      return {
+        x: tl[0],
+        y: tl[1],
+        w: Math.max.apply(null, xs) - Math.min.apply(null, xs),
+        h: Math.max.apply(null, ys) - Math.min.apply(null, ys),
+      };
+    },
+  };
+
+  /* ----- pen edge analysis -----
+   *
+   * Clicking the pen's corners by hand is the fiddly part of calibrating it:
+   * a few pixels of slop and the fit is wrong. The pen's sides are straight
+   * lines in the picture, though, and they are visible -- so the operator's
+   * clicks only have to say roughly WHICH side each one is, and the sides can
+   * be re-found from the image itself. The corners then follow from the
+   * sides' intersections.
+   *
+   * Everything here works on a plain pixel buffer rather than a canvas, so
+   * it can be tested without a browser.
+   */
+  const penEdges = {
+    /* Greyscale, blur, Sobel. The threshold is ADAPTIVE -- the 85th
+     * percentile of the gradient magnitudes -- so it works whatever the
+     * pen's contrast is, rather than against a hard-coded number that only
+     * suits one picture. */
+    analyse: function (imageData) {
+      const W = imageData.width;
+      const H = imageData.height;
+      const src = imageData.data;
+      const grey = new Float32Array(W * H);
+      for (let i = 0, n = W * H; i < n; i++) {
+        const o = i * 4;
+        grey[i] = 0.299 * src[o] + 0.587 * src[o + 1] + 0.114 * src[o + 2];
+      }
+
+      /* A 3x3 box blur: one pass of noise removal. Without it the tiniest
+       * speckle outvotes the pen's edge. */
+      const blur = new Float32Array(W * H);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let sum = 0, n = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= W) continue;
+              sum += grey[yy * W + xx];
+              n++;
+            }
+          }
+          blur[y * W + x] = sum / n;
+        }
+      }
+
+      const mag = new Float32Array(W * H);
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          const gx = -blur[i - W - 1] - 2 * blur[i - W] - blur[i - W + 1]
+                     + blur[i + W - 1] + 2 * blur[i + W] + blur[i + W + 1];
+          const gy = -blur[i - W - 1] - 2 * blur[i - 1] - blur[i + W - 1]
+                     + blur[i - W + 1] + 2 * blur[i + 1] + blur[i + W + 1];
+          mag[i] = Math.hypot(gx, gy);
+        }
+      }
+
+      /* The threshold has to be above the NOISE, and a percentile of all the
+       * samples is no use for that: in a picture of a mostly flat pen floor
+       * the 85th percentile lands among the noise, and then every speckle
+       * counts as an edge and the "refinement" finds whatever is nearest.
+       *
+       * What matters is the STRONGEST edge in the picture, so the threshold
+       * is a fraction of that. The 99.9th percentile stands in for the
+       * maximum, so that one hot pixel cannot drag the bar up with it. */
+      const peak = penEdges.percentile(mag, 0.999);
+      const threshold = peak * 0.25;
+
+      return {
+        W: W, H: H, mag: mag,
+        peak: peak,
+        threshold: threshold,
+      };
+    },
+
+    /* The value below which p (0..1) of the samples lie. A histogram
+     * rather than a sort: the buffer is ~100k samples and this runs on
+     * every frame the operator calibrates. */
+    percentile: function (values, p) {
+      const MAX = 512;
+      let max = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (values[i] > max) max = values[i];
+      }
+      if (max <= 0) return 0;
+
+      const hist = new Uint32Array(MAX);
+      for (let i = 0; i < values.length; i++) {
+        let idx = Math.floor((values[i] / max) * (MAX - 1));
+        if (idx < 0) idx = 0;
+        if (idx >= MAX) idx = MAX - 1;
+        hist[idx]++;
+      }
+
+      const want = values.length * p;
+      let seen = 0;
+      for (let b = 0; b < MAX; b++) {
+        seen += hist[b];
+        if (seen >= want) return (b / (MAX - 1)) * max;
+      }
+      return max;
+    },
+
+    /**
+     * Refine a quadrilateral against the image's edges.
+     *
+     * `corners` are in the analysis's pixel space, in the order
+     * near-left, near-right, far-right, far-left. Each side is re-found by
+     * walking along the clicked segment and looking for the strongest edge
+     * just off it; the four sides are then intersected for the corners.
+     *
+     * A side with too little edge support is left as the operator clicked it
+     * -- and reported, because a guessed edge is worse than a rough click.
+     */
+    refine: function (analysis, corners, opts) {
+      opts = opts || {};
+      const band = opts.band != null ? opts.band : 10;
+      const step = opts.step != null ? opts.step : 1.5;
+      const minSupport = opts.minSupport != null ? opts.minSupport : 0.15;
+      const maxMove = opts.maxMove != null ? opts.maxMove : Infinity;
+      const trim = opts.trim != null ? opts.trim : 0.12;
+
+      const sides = [];
+      for (let k = 0; k < 4; k++) {
+        const a = corners[k];
+        const b = corners[(k + 1) % 4];
+        sides.push(penEdges.refineSide(analysis, a, b, band, step, minSupport, trim));
+      }
+
+      /* The corners are the intersections of the refined sides: corner k sits
+       * between side k-1 and side k. */
+      const out = [];
+      const moved = [];
+      const suspicious = [];
+      for (let k = 0; k < 4; k++) {
+        const prev = sides[(k + 3) % 4];
+        const next = sides[k];
+        const l1 = prev && prev.ok ? prev.line : penEdges.lineThrough(corners[(k + 3) % 4], corners[k]);
+        const l2 = next && next.ok ? next.line : penEdges.lineThrough(corners[k], corners[(k + 1) % 4]);
+        const hit = penEdges.intersect(l1, l2);
+        const clicked = corners[k];
+        if (!hit) {
+          out.push(clicked.slice());
+          moved.push(0);
+          suspicious.push(false);
+          continue;
+        }
+        const d = Math.hypot(hit[0] - clicked[0], hit[1] - clicked[1]);
+        out.push(hit);
+        moved.push(d);
+        suspicious.push(d > maxMove);
+      }
+
+      return { corners: out, sides: sides, moved: moved, suspicious: suspicious };
+    },
+
+    /* Walk along a segment and find the strongest edge just off it. */
+    refineSide: function (analysis, a, b, band, step, minSupport, trim) {
+      const W = analysis.W, H = analysis.H, mag = analysis.mag;
+      const threshold = analysis.threshold;
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 6) {
+        return { ok: false, support: 0, line: penEdges.lineThrough(a, b) };
+      }
+      const ux = dx / len, uy = dy / len;
+      const nx = -uy, ny = ux;
+      const steps = Math.max(2, Math.round(len / step));
+      /* The ends of a side are the corners, and a corner BENDS: the edge
+       * there is not on the straight line the rest of the side follows.
+       * Fitting through those points drags the line towards the corner and
+       * puts the intersection in the wrong place, so the ends are trimmed
+       * off before the line is fitted. */
+      const trimLen = trim ? Math.min(len * 0.4, len * trim) : 0;
+      const pts = [];
+      let searched = 0;
+      for (let s = 0; s <= steps; s++) {
+        const t = (s / steps) * len;
+        if (t < trimLen || t > len - trimLen) continue;
+        searched++;
+        const cx = a[0] + ux * t, cy = a[1] + uy * t;
+        let bestOff = 0, bestVal = 0;
+        for (let o = -band; o <= band; o++) {
+          const x = Math.round(cx + nx * o);
+          const y = Math.round(cy + ny * o);
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          const v = mag[y * W + x];
+          if (v > bestVal) { bestVal = v; bestOff = o; }
+        }
+        if (bestVal <= threshold) continue;
+        /* Sub-pixel: a parabola through the three samples around the peak
+         * says where the edge really is. Without it the corner lands on a
+         * whole pixel off, which is the very error this is meant to remove.
+         * The parabola gives a SHIFT from the peak, so the peak's own offset
+         * has to be added to it. */
+        const shift = penEdges.subpixel(mag, W, H, cx + nx * bestOff, cy + ny * bestOff, nx, ny);
+        const off = bestOff + shift;
+        pts.push([cx + nx * off, cy + ny * off]);
+      }
+      const support = searched ? pts.length / searched : 0;
+      if (support < minSupport || pts.length < 2) {
+        return { ok: false, support: support, line: penEdges.lineThrough(a, b) };
+      }
+      return { ok: true, support: support, line: penEdges.fitLine(pts) };
+    },
+
+    /* The offset, to a fraction of a pixel, of the gradient peak. */
+    subpixel: function (mag, W, H, x0, y0, nx, ny) {
+      const at = (d) => {
+        const x = Math.round(x0 + nx * d);
+        const y = Math.round(y0 + ny * d);
+        if (x < 0 || y < 0 || x >= W || y >= H) return 0;
+        return mag[y * W + x];
+      };
+      const m = at(0);
+      const l = at(-1);
+      const r = at(1);
+      const den = l - 2 * m + r;
+      if (Math.abs(den) < 1e-6) return 0;
+      const shift = 0.5 * (l - r) / den;
+      /* A parabola's vertex cannot be further than half a sample from the
+       * peak, or the fit is noise. */
+      return Math.max(-1, Math.min(1, shift));
+    },
+
+    /* A line through two points. */
+    lineThrough: function (a, b) {
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy) || 1;
+      return { px: a[0], py: a[1], dx: dx / len, dy: dy / len };
+    },
+
+    /* The best-fit line through a set of points -- total least squares, so
+     * the line is not pulled towards one axis by the aspect of the picture. */
+    fitLine: function (pts) {
+      let mx = 0, my = 0;
+      for (const p of pts) { mx += p[0]; my += p[1]; }
+      mx /= pts.length;
+      my /= pts.length;
+      let sxx = 0, sxy = 0, syy = 0;
+      for (const p of pts) {
+        const dx = p[0] - mx, dy = p[1] - my;
+        sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+      }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      return { px: mx, py: my, dx: Math.cos(ang), dy: Math.sin(ang) };
+    },
+
+    /* Where two lines cross. */
+    intersect: function (l1, l2) {
+      const den = l1.dx * l2.dy - l1.dy * l2.dx;
+      if (Math.abs(den) < 1e-6) return null;
+      const t = ((l2.px - l1.px) * l2.dy - (l2.py - l1.py) * l2.dx) / den;
+      return [l1.px + t * l1.dx, l1.py + t * l1.dy];
+    },
+  };
+
+  window.__dash = { toast, initStatusPoll, initDashboardRefresh, fecesSignal, createAlerter, penCalibration, penEdges };
 
   document.addEventListener('DOMContentLoaded', () => {
     initClock();

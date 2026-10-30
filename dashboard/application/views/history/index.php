@@ -37,13 +37,21 @@ $qs = function ($over) use ($filter) {
             </td>
             <?php $ic = max(1, (int) ($r['instance_count'] ?? 1)); ?>
             <td><?php if ($ic > 1): ?><span class="chip chip-verified">&times;<?= $ic ?></span><?php else: ?><span class="muted">1</span><?php endif; ?></td>
-            <?php /* Primary feces box in stream pixels (X,Y = top-left corner).
+            <?php /* Primary feces box. Centimetres on the pen when the pen was
+                   * calibrated, stream pixels otherwise.
                    * The multiplier pair follows the live stream's VGA 640x480;
                    * the title carries the normalized 0..1 wire values and the
                    * box size so nothing is lost from the old percent display. */ ?>
-            <td><?php if (isset($r['x']) && $r['x'] !== null && $r['x'] !== ''): ?>
-              <?php $fx = (float) $r['x']; $fy = (float) $r['y']; $fw = (float) $r['w']; $fh = (float) $r['h']; ?>
-              <span class="num" title="x <?= $fx ?>, y <?= $fy ?> normalized · <?= (int) round($fw * 640) ?>×<?= (int) round($fh * 480) ?> px">X <?= (int) round($fx * 640) ?> · Y <?= (int) round($fy * 480) ?></span>
+            <?php $hasBox = isset($r['x']) && $r['x'] !== null && $r['x'] !== '';
+                  $hasCm = isset($r['x_cm']) && $r['x_cm'] !== null && $r['x_cm'] !== '';
+                  $fx = $hasBox ? (float) $r['x'] : 0.0; $fy = $hasBox ? (float) $r['y'] : 0.0;
+                  $fw = $hasBox ? (float) $r['w'] : 0.0; $fh = $hasBox ? (float) $r['h'] : 0.0;
+                  $boxTitle = 'x ' . round($fx, 4) . ', y ' . round($fy, 4) . ' normalized · '
+                            . (int) round($fw * 640) . '×' . (int) round($fh * 480) . ' px'; ?>
+            <td><?php if ($hasCm): ?>
+              <span class="num" title="<?= htmlspecialchars($boxTitle) ?>">X <?= number_format((float) $r['x_cm'], 1) ?> · Y <?= number_format((float) $r['y_cm'], 1) ?> cm</span>
+            <?php elseif ($hasBox): ?>
+              <span class="num" title="<?= htmlspecialchars($boxTitle) ?>">X <?= (int) round($fx * 640) ?> · Y <?= (int) round($fy * 480) ?></span>
             <?php else: ?><span class="muted">—</span><?php endif; ?></td>
             <td><span class="badge <?= $r['triggered'] ? 'badge-yes' : 'badge-no' ?>"><?= $r['triggered'] ? 'Yes' : 'No' ?></span></td>
             <td class="num"><?= (int) $r['spray_duration'] ?></td>

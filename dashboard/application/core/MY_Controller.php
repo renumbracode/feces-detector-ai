@@ -39,6 +39,33 @@ class MY_Controller extends CI_Controller
         return $this->Setting_model->get('verify_url', 'http://localhost:8000/verify');
     }
 
+    /**
+     * The actuator board's own configuration endpoint.
+     *
+     * The board that does the aiming needs the pen calibration the
+     * dashboard fitted, and it takes it at /config. The URL the DETECTOR
+     * board publishes to is the same host with a different path, so it is
+     * the natural place to learn the address from -- with an explicit
+     * override for setups where that is not true.
+     */
+    protected function actuator_config_url()
+    {
+        $explicit = trim((string) $this->Setting_model->get('actuator_config_url', ''));
+        if ($explicit !== '') {
+            return $explicit;
+        }
+        $target = trim((string) $this->Setting_model->get('target_url', ''));
+        if ($target === '') {
+            return '';
+        }
+        /* Drop the last path segment and put /config in its place. */
+        $base = preg_replace('#/[^/]*$#', '', $target);
+        if ($base === null || $base === '') {
+            return '';
+        }
+        return $base . '/config';
+    }
+
     /** Simple GET with timeout. Returns response body or null on failure. */
     protected function http_get($url, $timeout = 3)
     {
@@ -65,5 +92,21 @@ class MY_Controller extends CI_Controller
         if ($body === false) return null;
         $json = json_decode($body, true);
         return is_array($json) ? $json : null;
+    }
+
+    /** POST a form-encoded body. Returns the raw reply, or null. */
+    protected function http_post_form($url, $body, $timeout = 8)
+    {
+        $ctx = stream_context_create([
+            'http' => [
+                'method'        => 'POST',
+                'header'        => "Content-Type: application/x-www-form-urlencoded\r\n",
+                'content'       => $body,
+                'timeout'       => $timeout,
+                'ignore_errors' => true,
+            ],
+        ]);
+        $reply = @file_get_contents($url, false, $ctx);
+        return $reply === false ? null : $reply;
     }
 }

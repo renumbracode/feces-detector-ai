@@ -75,6 +75,37 @@ class Control extends MY_Controller
                 if ($verifyUrl !== '' && filter_var($verifyUrl, FILTER_VALIDATE_URL) === false) {
                     $verifyUrl = $this->verify_url();
                 }
+                /* The pen's size, and how far apart its centimetre gridlines
+                 * sit. The size is part of the calibration, not a free-standing
+                 * number: the fit that maps the picture onto the pen was made
+                 * for a particular size, so changing the size invalidates it
+                 * and the operator is told to calibrate again rather than
+                 * being left with numbers that describe a pen that no longer
+                 * exists. */
+                $penWidth = (float) $this->input->post('pen_width_cm');
+                $penLength = (float) $this->input->post('pen_length_cm');
+                $penWidth = max(1.0, min(500.0, $penWidth > 0 ? $penWidth : 20.0));
+                $penLength = max(1.0, min(500.0, $penLength > 0 ? $penLength : 30.0));
+                $oldWidth = (float) $this->Setting_model->get('pen_width_cm', '20');
+                $oldLength = (float) $this->Setting_model->get('pen_length_cm', '30');
+                $sizeChanged = (abs($penWidth - $oldWidth) > 0.01 || abs($penLength - $oldLength) > 0.01);
+
+                $gridStep = (float) $this->input->post('grid_step_cm');
+                $gridStep = max(0.5, min(50.0, $gridStep > 0 ? $gridStep : 5.0));
+
+                /* Which end of the picture the camera is at. The picture's
+                 * bottom is the pen's near end by default; a camera
+                 * mounted the other way round flips it. */
+                $flipY = ((string) $this->input->post('pen_flip_y')) === '1' ? '1' : '0';
+
+                /* Where the pen calibration can be pushed to. Blank means
+                 * "work it out from the actuator board's target URL", which
+                 * is the same host with a different path. */
+                $actuatorConfig = trim((string) $this->input->post('actuator_config_url'));
+                if ($actuatorConfig !== '' && filter_var($actuatorConfig, FILTER_VALIDATE_URL) === false) {
+                    $actuatorConfig = '';
+                }
+
                 $vals = [
                     'esp32_ip'          => substr(preg_replace('/[^0-9a-zA-Z.:]/', '', (string) $this->input->post('esp32_ip')), 0, 45),
                     'esp_port'          => substr(preg_replace('/[^0-9]/', '', (string) $this->input->post('esp_port')), 0, 6),
@@ -83,11 +114,27 @@ class Control extends MY_Controller
                     'spray_duration_ms' => max(1, (int) $this->input->post('spray_duration_ms') ?: 5000),
                     'cooldown_ms'       => max(0, (int) $this->input->post('cooldown_ms') ?: 300000),
                     'threshold'         => max(0, min(1, (float) $this->input->post('threshold'))),
+                    'pen_width_cm'      => (string) round($penWidth, 2),
+                    'pen_length_cm'     => (string) round($penLength, 2),
+                    'grid_step_cm'      => (string) round($gridStep, 2),
+                    'pen_flip_y'        => $flipY,
+                    'actuator_config_url' => substr($actuatorConfig, 0, 255),
                 ];
                 foreach ($vals as $k => $v) {
                     $this->Setting_model->set($k, (string) $v);
                 }
-                $flash = ['ok', 'Settings saved.'];
+                if ($sizeChanged) {
+                    /* A fit was made for a particular size, so it no longer
+                     * describes the pen. Drop it: the plain model takes over,
+                     * and it follows the new size by itself. */
+                    $hadFit = trim($this->Setting_model->get('pen_homography', '')) !== '';
+                    $this->Setting_model->set('pen_homography', '');
+                    $flash = $hadFit
+                        ? ['ok', 'Settings saved. The pen size changed, so the fit to the picture was cleared — the plain model applies again, which needs no fitting.']
+                        : ['ok', 'Settings saved. The grid follows the pen\'s new size.'];
+                } else {
+                    $flash = ['ok', 'Settings saved.'];
+                }
             }
 
             /* Camera registry (multi-camera groundwork): activate/deactivate or
@@ -162,6 +209,15 @@ class Control extends MY_Controller
                  * shows something sensible when the board is offline. */
                 'target_url'        => $this->Setting_model->get('target_url', ''),
                 'target_enabled'    => $this->Setting_model->get('target_enabled', '0'),
+                /* The pen, which is the calibration target for the live view's
+                 * centimetre grid. */
+                'pen_width_cm'      => $this->Setting_model->get('pen_width_cm', '20'),
+                'pen_length_cm'     => $this->Setting_model->get('pen_length_cm', '30'),
+                'grid_step_cm'      => $this->Setting_model->get('grid_step_cm', '5'),
+                'pen_calibrated'    => trim($this->Setting_model->get('pen_homography', '')) !== '',
+                'pen_flip_y'        => $this->Setting_model->get('pen_flip_y', '0'),
+                'actuator_config_url' => $this->Setting_model->get('actuator_config_url', ''),
+                'actuator_config_effective' => $this->actuator_config_url(),
             ],
         ];
         $this->load->view('control/index', $data);
