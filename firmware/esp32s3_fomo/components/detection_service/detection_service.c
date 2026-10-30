@@ -330,6 +330,18 @@ static long prv_post_dashboard(const app_config_t *cfg, float conf,
         "%s?confidence=%.4f&triggered=%d&spray_ms=%u&esp=esp32s3&model=%s&notes=%s&count=%u",
         cfg->dash_url, (double)conf, triggered ? 1 : 0, (unsigned)spray_ms,
         edge_impulse_model_tag(), notes, (unsigned)instance_count);
+    /* The frame size travels with the row. The dashboard converts the
+     * normalized coordinates to centimetres against the pen, and that only
+     * works if it knows which picture they came from: the sensor can clamp
+     * the framesize away from the 640x480 we asked for, and a stale constant
+     * would silently mis-scale every centimetre it reports. */
+    uint16_t fw = 0, fh = 0;
+    camera_service_frame_size(&fw, &fh);
+    if (ulen > 0 && (size_t)ulen < sizeof(url)) {
+        int n = snprintf(url + ulen, sizeof(url) - (size_t)ulen,
+                         "&fw=%u&fh=%u", (unsigned)fw, (unsigned)fh);
+        if (n > 0) ulen += n;
+    }
     /* Append the primary box only when there is one: a row without coordinates
      * must stay NULL in the DB so pre-coordinate history stays distinguishable,
      * never a fabricated position. */

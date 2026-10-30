@@ -94,6 +94,14 @@ static void prv_resize_rgb(const uint8_t *src, int sw, int sh,
 #define SENSOR_WIN_16X9_W 1952
 #define SENSOR_WIN_16X9_H 1092
 
+/* The crop's share of the full frame, and where it starts. The model only
+ * ever sees the centred 16:9 window, so every coordinate it produces is a
+ * fraction of THAT, not of the frame the live view shows. */
+#define CROP_KX ((float)SENSOR_WIN_16X9_W / (float)SENSOR_WIN_4X3_W)
+#define CROP_KY ((float)SENSOR_WIN_16X9_H / (float)SENSOR_WIN_4X3_H)
+#define CROP_OX ((1.0f - CROP_KX) * 0.5f)
+#define CROP_OY ((1.0f - CROP_KY) * 0.5f)
+
 /* Parse JPEG dimensions from the SOF marker so we know the source size
  * before esp_jpeg decodes (sensor frames are hardware-encoded JPEG). */
 static bool prv_jpeg_dims(const uint8_t *jpeg, size_t len, int *w, int *h)
@@ -166,6 +174,44 @@ static uint8_t *prv_decode_jpeg(const uint8_t *jpeg, size_t len, int *w, int *h)
     return rgb;
 }
 
+/* Put the boxes back into FULL-frame coordinates.
+ *
+ * The model sees the centred 16:9 crop (see the framing block above), so the
+ * coordinates it produces are fractions of that crop. Everything downstream
+ * -- the /status JSON, the dashboard's live overlay, the detections table and
+ * the actuator board's floor solve -- treats them as fractions of the whole
+ * frame, because that is what the live view shows. Left alone, the mismatch
+ * stretches every box about the frame centre by the crop's own margins: 6.2%
+ * in x and 29.5% in y, which on a 20 cm pen is over a centimetre of error at
+ * the edges and makes the drawn box sit visibly off the droppings.
+ *
+ * The remap is affine, so a centroid maps correctly and a size just scales.
+ * It is done here, once, so the whole chain agrees with the picture. */
+static void prv_remap_to_full_frame(fomo_result_t *r)
+{
+    const float kx = CROP_KX;
+    const float ky = CROP_KY;
+    const float ox = CROP_OX;
+    const float oy = CROP_OY;
+
+    for (uint8_t i = 0; i < r->feces_count && i < FOMO_MAX_FECES_BOXES; i++) {
+        fomo_box_t *b = &r->feces_boxes[i];
+        b->x = ox + b->x * kx;
+        b->y = oy + b->y * ky;
+        b->width *= kx;
+        b->height *= ky;
+    }
+
+    /* The legacy single-box fields describe the same crop. class_id == -1
+     * means nothing was detected, and there is no box to move. */
+    if (r->class_id == EI_CLASS_FECES || r->class_id == EI_CLASS_PIG) {
+        r->x = ox + r->x * kx;
+        r->y = oy + r->y * ky;
+        r->width *= kx;
+        r->height *= ky;
+    }
+}
+
 fomo_result_t inference_service_classify(const uint8_t *jpeg, size_t len)
 {
     fomo_result_t out;
@@ -212,6 +258,9 @@ fomo_result_t inference_service_classify(const uint8_t *jpeg, size_t len)
         out.object_present = false;
         return out;
     }
+    /* The model worked in crop coordinates; the world works in frame
+     * coordinates. */
+    prv_remap_to_full_frame(&out);
     out.inference_ms = ms;
 
     if (xSemaphoreTake(s_lock, portMAX_DELAY) == pdTRUE) {
