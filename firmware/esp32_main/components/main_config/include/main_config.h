@@ -18,6 +18,48 @@
 
 #define MAIN_NVS_NAMESPACE "fomo_act"
 
+/* The pen, as the calibration target.
+ *
+ * The camera sits at ONE END of the pigpen and the sprayer at the other, so
+ * the floor is seen in perspective and the pen's four corners are a known
+ * rectangle on it. Four point correspondences fit a homography, and that maps
+ * the picture onto the pen exactly -- no camera height, no tilt, no lens
+ * field of view to be guessed.
+ *
+ * The matrix is stored as eight numbers: it maps pen centimetres to a
+ * fraction of the image, with the bottom-right term fixed at 1.
+ *
+ * Pen frame:
+ *   X = across the pen, 0 at the near-left corner as the camera sees it
+ *   Y = along the pen, 0 at the camera's end, growing toward the sprayer
+ *
+ * The nozzle faces BACK toward the camera, so its forward direction is -Y.
+ *
+ * The travel limits here are the SERVO's own numbering (0 = one end stop),
+ * which is not the same numbering as the geometric angles in the
+ * camera-pose model above. That is why they are kept apart: the two models
+ * describe the same servo from two different reference frames, and the
+ * limits belong to the servo, not to either model. */
+typedef struct {
+    bool  present;           /* the pen's size is known, so the pen model
+                              * may be used at all */
+    bool  fitted;            /* h[] holds a fit to the picture; when it does
+                              * not, the LINEAR model applies */
+    float h[8];              /* the homography: pen cm -> image fraction */
+    float width_cm;          /* across the pen */
+    float length_cm;         /* along the pen */
+    float flip_y;            /* 1 when the camera is at the top of the picture */
+    float nozzle_x_cm;       /* the nozzle, in the pen frame */
+    float nozzle_y_cm;
+    float nozzle_height_mm;  /* above the pen floor */
+    float pan_offset_deg;    /* the angle that aims straight down the pen */
+    float tilt_offset_deg;   /* the angle that points straight down */
+    float pan_dir;           /* +1: the picture's left is the servo's left */
+    float tilt_dir;          /* +1: the servo number grows as the spot nears */
+    float pan_min, pan_max;  /* the servo's travel, in its own numbering */
+    float tilt_min, tilt_max;
+} pen_cal_t;
+
 /* Calibration and limits, all stored as 4-byte float blobs so a value can be
  * written without knowing its type at the call site. */
 typedef struct {
@@ -28,6 +70,11 @@ typedef struct {
 
     /* Nozzle mount. */
     float nozzle_x, nozzle_y, nozzle_height;
+
+    /* The pen calibration. When it is present, the board aims using the
+     * pen's own centimetres instead of the camera-pose model above. It is
+     * stored as one blob: it is one thing, set and cleared together. */
+    pen_cal_t pen;
 
     /* Servo mechanical limits, degrees. The solver clamps to these, so a
      * bad calibration cannot drive a servo into its end stop. */

@@ -144,6 +144,100 @@ int main(void)
     ok_close("yawed world x", y.world_x, -2000.0f, 2.0f);
     ok_close("yawed world y", y.world_y, 2000.0f, 2.0f);
 
+    printf("\n[9] the pen calibration maps the picture onto the pen\n");
+    /* The pen is a known 20 x 30 cm rectangle, and the camera sits at one
+     * end of it looking down the length. The matrix below was fitted to the
+     * four corners of such a view: a camera 350 mm above the floor, 200 mm
+     * behind the pen's near edge, looking down 45 degrees. */
+    geometry_pen_t pen;
+    memset(&pen, 0, sizeof(pen));
+    pen.present = true;
+    pen.h[0] = 0.022269846f;  pen.h[1] = 0.0090909091f;
+    pen.h[2] = 0.2773015404f;  pen.h[3] = 0.0f;
+    pen.h[4] = -0.011905303f;  pen.h[5] = 0.8149431818f;
+    pen.h[6] = 0.0f;          pen.h[7] = 0.0181818182f;
+    pen.width_cm = 20.0f;
+    pen.length_cm = 30.0f;
+    pen.nozzle_x_cm = 10.0f;      /* over the middle of the pen */
+    pen.nozzle_y_cm = 30.0f;      /* at the far end, facing back down it */
+    pen.nozzle_height_mm = 225.0f;
+    pen.pan_offset_deg = 35.0f;   /* the travel's midpoint aims at the middle */
+    pen.tilt_offset_deg = 35.0f;  /* the travel's far end points straight down */
+    pen.pan_dir = 1.0f;
+    pen.tilt_dir = 1.0f;
+    pen.pan_min = 0.0f;  pen.pan_max = 70.0f;
+    pen.tilt_min = 70.0f; pen.tilt_max = 125.0f;
+
+    /* The pen's corners, as the picture sees them. */
+    {
+        float cx = 0.0f, cy = 0.0f;
+        ok("near-left corner solves",
+           geometry_pen_image_to_cm(&pen, 0.2773f, 0.8149f, &cx, &cy));
+        ok_close("near-left cm x", cx, 0.0f, 0.05f);
+        ok_close("near-left cm y", cy, 0.0f, 0.05f);
+
+        ok("far-right corner solves",
+           geometry_pen_image_to_cm(&pen, 0.6441f, 0.2962f, &cx, &cy));
+        ok_close("far-right cm x", cx, 20.0f, 0.05f);
+        ok_close("far-right cm y", cy, 30.0f, 0.05f);
+
+        ok("centre solves",
+           geometry_pen_image_to_cm(&pen, 0.5f, 0.5f, &cx, &cy));
+        ok_close("centre cm x", cx, 10.0f, 0.05f);
+        ok_close("centre cm y", cy, 15.0f, 0.05f);
+    }
+
+    printf("\n[10] aiming with the pen\n");
+    {
+        geometry_result_t p;
+        /* The pen's centre, at the picture's centre. */
+        ok("centre box solves", geometry_solve_pen(&pen, 0.49f, 0.49f, 0.02f, 0.02f, &p));
+        ok_close("centre pan is the travel's midpoint", p.pan, 35.0f, 0.2f);
+        /* 150 mm straight ahead of a nozzle 225 mm up. */
+        ok_close("centre tilt",
+                 p.tilt, 35.0f + atan2f(225.0f, 150.0f) * 180.0f / 3.14159265f, 0.3f);
+        ok("centre is not clamped", !p.clamped);
+
+        /* The far end of the pen: 300 mm away, so the nozzle leans out. */
+        ok("far-end box solves", geometry_solve_pen(&pen, 0.49f, 0.8049f, 0.02f, 0.02f, &p));
+        ok_close("far-end tilt",
+                 p.tilt, 35.0f + atan2f(225.0f, 300.0f) * 180.0f / 3.14159265f, 0.3f);
+        ok("far-end tilt is inside the travel", p.tilt >= pen.tilt_min && p.tilt <= pen.tilt_max);
+
+        /* The near end, directly below the nozzle: the steepest aim there
+         * is, and the top of the travel. */
+        ok("near-end box solves", geometry_solve_pen(&pen, 0.49f, 0.2862f, 0.02f, 0.02f, &p));
+        ok_close("near-end tilt is the travel's top end", p.tilt, 125.0f, 0.3f);
+
+        /* The picture's left is the servo's left. */
+        geometry_result_t lft;
+        geometry_result_t rgt;
+        geometry_solve_pen(&pen, 0.30f, 0.49f, 0.02f, 0.02f, &lft);
+        geometry_solve_pen(&pen, 0.68f, 0.49f, 0.02f, 0.02f, &rgt);
+        ok("the picture's left is the larger pan", lft.pan > rgt.pan);
+        ok("both pans are inside the travel",
+           lft.pan <= pen.pan_max && rgt.pan >= pen.pan_min);
+    }
+
+    printf("\n[11] a missing or broken pen calibration is refused\n");
+    {
+        geometry_result_t p;
+        geometry_pen_t none = pen;
+        none.present = false;
+        ok("an absent calibration is refused",
+           !geometry_solve_pen(&none, 0.5f, 0.5f, 0.02f, 0.02f, &p));
+
+        /* Four points in a line: the matrix cannot be inverted. */
+        float degenerate[8] = { 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f };
+        float inv[8];
+        ok("a degenerate matrix cannot be inverted",
+           !geometry_invert_homography(degenerate, inv));
+
+        /* And a good matrix round-trips through its own inverse. */
+        float back[8];
+        ok("a good matrix inverts", geometry_invert_homography(pen.h, back));
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

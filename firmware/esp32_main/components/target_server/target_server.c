@@ -256,19 +256,49 @@ static esp_err_t handler_target(httpd_req_t *req)
     main_config_t cfg;
     main_config_load(&cfg);
 
-    geometry_cal_t cal = {
-        .cam_x = cfg.cam_x, .cam_y = cfg.cam_y, .cam_height = cfg.cam_height,
-        .cam_yaw_deg = cfg.cam_yaw_deg, .cam_pitch_deg = cfg.cam_pitch_deg,
-        .focal_px = cfg.focal_px,
-        .nozzle_x = cfg.nozzle_x, .nozzle_y = cfg.nozzle_y,
-        .nozzle_height = cfg.nozzle_height,
-        .pan_min = cfg.pan_min, .pan_max = cfg.pan_max,
-        .tilt_min = cfg.tilt_min, .tilt_max = cfg.tilt_max,
-    };
-
     geometry_result_t g;
-    if (!geometry_solve(&cal, best.x, best.y, best.w, best.h,
-                        (uint16_t)frame_w, (uint16_t)frame_h, &g)) {
+    bool solved;
+    if (cfg.pen.present) {
+        /* The pen model is the right one for this rig: the camera looks
+         * straight down, so the picture IS the pen and the board needs
+         * nothing but the pen's size to aim. A fit to the picture is only
+         * used when one has been pushed, for a camera that is not
+         * square-on. */
+        geometry_pen_t pen = {
+            .present = cfg.pen.present,
+            .fitted = cfg.pen.fitted,
+            .width_cm = cfg.pen.width_cm,
+            .length_cm = cfg.pen.length_cm,
+            .flip_y = cfg.pen.flip_y,
+            .nozzle_x_cm = cfg.pen.nozzle_x_cm,
+            .nozzle_y_cm = cfg.pen.nozzle_y_cm,
+            .nozzle_height_mm = cfg.pen.nozzle_height_mm,
+            .pan_offset_deg = cfg.pen.pan_offset_deg,
+            .tilt_offset_deg = cfg.pen.tilt_offset_deg,
+            .pan_dir = cfg.pen.pan_dir,
+            .tilt_dir = cfg.pen.tilt_dir,
+            .pan_min = cfg.pen.pan_min,
+            .pan_max = cfg.pen.pan_max,
+            .tilt_min = cfg.pen.tilt_min,
+            .tilt_max = cfg.pen.tilt_max,
+        };
+        memcpy(pen.h, cfg.pen.h, sizeof(pen.h));
+        solved = geometry_solve_pen(&pen, best.x, best.y, best.w, best.h, &g);
+    } else {
+        /* No pen calibration: fall back to the camera-pose model. */
+        geometry_cal_t cal = {
+            .cam_x = cfg.cam_x, .cam_y = cfg.cam_y, .cam_height = cfg.cam_height,
+            .cam_yaw_deg = cfg.cam_yaw_deg, .cam_pitch_deg = cfg.cam_pitch_deg,
+            .focal_px = cfg.focal_px,
+            .nozzle_x = cfg.nozzle_x, .nozzle_y = cfg.nozzle_y,
+            .nozzle_height = cfg.nozzle_height,
+            .pan_min = cfg.pan_min, .pan_max = cfg.pan_max,
+            .tilt_min = cfg.tilt_min, .tilt_max = cfg.tilt_max,
+        };
+        solved = geometry_solve(&cal, best.x, best.y, best.w, best.h,
+                                (uint16_t)frame_w, (uint16_t)frame_h, &g);
+    }
+    if (!solved) {
         ESP_LOGW(TAG, "detection %ld did not solve to an angle", det_id);
         return prv_reply(req, "{\"ok\":true,\"accepted\":false,\"reason\":\"solve_failed\"}");
     }
@@ -415,7 +445,7 @@ static esp_err_t handler_config(httpd_req_t *req)
 {
     main_config_t c;
     main_config_load(&c);
-    char buf[768];
+    char buf[1400];
     int n = snprintf(buf, sizeof(buf),
         "{\"cam_x\":%.1f,\"cam_y\":%.1f,\"cam_height\":%.1f,"
         "\"cam_yaw\":%.1f,\"cam_pitch\":%.1f,\"focal_px\":%.1f,"
@@ -423,7 +453,17 @@ static esp_err_t handler_config(httpd_req_t *req)
         "\"pan_min\":%.1f,\"pan_max\":%.1f,\"tilt_min\":%.1f,\"tilt_max\":%.1f,"
         "\"pulse_min\":%u,\"pulse_max\":%u,"
         "\"water_min\":%.1f,\"spray_ms\":%u,\"cooldown_ms\":%u,"
-        "\"relay_active_low\":%s,\"enabled\":%s,\"float_sw\":%s}",
+        "\"relay_active_low\":%s,\"enabled\":%s,\"float_sw\":%s,"
+        /* The pen calibration, so a dashboard can push the matrix it fitted
+         * to this board. The matrix is a string here because it is a list,
+         * not a number, and a list in JSON has to be re-parsed by hand. */
+        "\"pen\":{\"present\":%s,\"fitted\":%s,"
+        "\"h\":\"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\","
+        "\"width_cm\":%.2f,\"length_cm\":%.2f,\"flip_y\":%.0f,"
+        "\"nozzle_x_cm\":%.2f,\"nozzle_y_cm\":%.2f,\"nozzle_height_mm\":%.1f,"
+        "\"pan_offset\":%.2f,\"tilt_offset\":%.2f,"
+        "\"pan_dir\":%.0f,\"tilt_dir\":%.0f,"
+        "\"pan_min\":%.1f,\"pan_max\":%.1f,\"tilt_min\":%.1f,\"tilt_max\":%.1f}}",
         (double)c.cam_x, (double)c.cam_y, (double)c.cam_height,
         (double)c.cam_yaw_deg, (double)c.cam_pitch_deg, (double)c.focal_px,
         (double)c.nozzle_x, (double)c.nozzle_y, (double)c.nozzle_height,
@@ -433,7 +473,20 @@ static esp_err_t handler_config(httpd_req_t *req)
         (double)c.water_min_pct, (unsigned)c.spray_ms, (unsigned)c.cooldown_ms,
         c.relay_active_low ? "true" : "false",
         c.enabled ? "true" : "false",
-        c.use_float_switch ? "true" : "false");
+        c.use_float_switch ? "true" : "false",
+        c.pen.present ? "true" : "false",
+        c.pen.fitted ? "true" : "false",
+        (double)c.pen.h[0], (double)c.pen.h[1], (double)c.pen.h[2],
+        (double)c.pen.h[3], (double)c.pen.h[4], (double)c.pen.h[5],
+        (double)c.pen.h[6], (double)c.pen.h[7],
+        (double)c.pen.width_cm, (double)c.pen.length_cm,
+        (double)c.pen.flip_y,
+        (double)c.pen.nozzle_x_cm, (double)c.pen.nozzle_y_cm,
+        (double)c.pen.nozzle_height_mm,
+        (double)c.pen.pan_offset_deg, (double)c.pen.tilt_offset_deg,
+        (double)c.pen.pan_dir, (double)c.pen.tilt_dir,
+        (double)c.pen.pan_min, (double)c.pen.pan_max,
+        (double)c.pen.tilt_min, (double)c.pen.tilt_max);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -503,6 +556,90 @@ static esp_err_t handler_config_post(httpd_req_t *req)
         snprintf(c.wifi_pass, sizeof(c.wifi_pass), "%.64s", v);
     }
 
+    /* ---- the pen calibration ----
+     *
+     * The matrix arrives as eight comma-separated numbers, which is how the
+     * dashboard sends it. It is parsed here rather than trusted: a matrix
+     * that cannot be inverted describes four points in a line, and the board
+     * would then aim at nonsense. */
+    {
+        static char mbuf[192];
+        /* The matrix and the flag arrive together: the flag says whether
+         * the board may use it, and the matrix is only stored when the flag
+         * says yes. Without the flag a POST that carried no pen fields at
+         * all would still switch the pen path on. */
+        int have_matrix = 0;
+        float m[8];
+        if (httpd_query_key_value(body, "pen_h", mbuf, sizeof(mbuf)) == ESP_OK) {
+            int n = 0;
+            const char *p = mbuf;
+            while (n < 8 && p != NULL && *p != '\0') {
+                char *end = NULL;
+                float f = strtof(p, &end);
+                if (end == p) {
+                    break;
+                }
+                m[n++] = f;
+                p = (*end == ',') ? (end + 1) : end;
+            }
+            if (n == 8) {
+                float inv[8];
+                /* A matrix that cannot be inverted describes four points in
+                 * a line, and the board would then aim at nonsense. */
+                if (geometry_invert_homography(m, inv)) {
+                    have_matrix = 1;
+                } else {
+                    ESP_LOGW(TAG, "pen matrix is degenerate, ignored");
+                }
+            } else {
+                ESP_LOGW(TAG, "pen matrix needs eight numbers, got %d", n);
+            }
+        }
+        if (httpd_query_key_value(body, "pen_ok", v, sizeof(v)) == ESP_OK) {
+            if (strcmp(v, "0") == 0) {
+                c.pen.present = false;
+                c.pen.fitted = false;
+            } else {
+                c.pen.present = true;
+                if (have_matrix) {
+                    memcpy(c.pen.h, m, sizeof(m));
+                    c.pen.fitted = true;
+                } else {
+                    /* No matrix: the LINEAR model applies, which needs only
+                     * the pen's size. */
+                    c.pen.fitted = false;
+                }
+            }
+        }
+    }
+    {
+        static const char *pkeys[] = {
+            "pen_w", "pen_l", "pen_flip_y", "pen_nx", "pen_ny", "pen_nh",
+            "pen_po", "pen_to", "pen_pd", "pen_td",
+            "pen_pmin", "pen_pmax", "pen_tmin", "pen_tmax",
+        };
+        float *pdst[] = {
+            &c.pen.width_cm, &c.pen.length_cm, &c.pen.flip_y,
+            &c.pen.nozzle_x_cm, &c.pen.nozzle_y_cm, &c.pen.nozzle_height_mm,
+            &c.pen.pan_offset_deg, &c.pen.tilt_offset_deg,
+            &c.pen.pan_dir, &c.pen.tilt_dir,
+            &c.pen.pan_min, &c.pen.pan_max, &c.pen.tilt_min, &c.pen.tilt_max,
+        };
+        for (size_t i = 0; i < sizeof(pkeys) / sizeof(pkeys[0]); i++) {
+            if (httpd_query_key_value(body, pkeys[i], v, sizeof(v)) == ESP_OK) {
+                *pdst[i] = strtof(v, NULL);
+            }
+        }
+        /* The direction flags are +/-1, and a zero or a stray value would
+         * silently mirror the aim. */
+        if (c.pen.pan_dir == 0.0f) {
+            c.pen.pan_dir = 1.0f;
+        }
+        if (c.pen.tilt_dir == 0.0f) {
+            c.pen.tilt_dir = 1.0f;
+        }
+    }
+
     main_config_save(&c);
     ESP_LOGI(TAG, "config updated; restarting to apply");
 
@@ -518,7 +655,20 @@ static esp_err_t handler_setup(httpd_req_t *req)
 {
     main_config_t c;
     main_config_load(&c);
-    char buf[4096];
+    /* The matrix as one editable string, the way the dashboard sends it.
+     * Blank when there is no fit: the plain model applies, and the field is
+     * for the case where the camera is not square-on. */
+    char pen_matrix[160];
+    if (c.pen.fitted) {
+        snprintf(pen_matrix, sizeof(pen_matrix),
+                 "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+                 (double)c.pen.h[0], (double)c.pen.h[1], (double)c.pen.h[2],
+                 (double)c.pen.h[3], (double)c.pen.h[4], (double)c.pen.h[5],
+                 (double)c.pen.h[6], (double)c.pen.h[7]);
+    } else {
+        pen_matrix[0] = '\0';
+    }
+    char buf[6144];
     int n = snprintf(buf, sizeof(buf),
         "<!doctype html><html><head><title>Actuator setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -552,6 +702,37 @@ static esp_err_t handler_setup(httpd_req_t *req)
         "<label>Pan max</label><input name='pan_max' value='%.1f'>"
         "<label>Tilt min</label><input name='tilt_min' value='%.1f'>"
         "<label>Tilt max</label><input name='tilt_max' value='%.1f'>"
+        "<h2>The pen</h2>"
+        "<p>The camera looks straight down at the pen, so the picture IS the "
+        "pen: every centimetre in the picture is the same size as every "
+        "other one, and the board needs nothing but the pen's size to aim. "
+        "The matrix below is only for a camera that is NOT square-on -- it "
+        "maps the picture onto the pen exactly, and the dashboard's live "
+        "view fits it for you.</p>"
+        "<label>Use the pen model</label><select name='pen_ok'>"
+        "<option value='1'%s>Yes, aim from the pen</option>"
+        "<option value='0'%s>No, use the camera pose above</option></select>"
+        "<label>Pen matrix (eight numbers, comma separated) — optional</label>"
+        "<input name='pen_h' value='%s' placeholder='leave blank for the plain model'>"
+        "<label>Pen width (cm)</label><input name='pen_w' value='%.2f'>"
+        "<label>Pen length (cm)</label><input name='pen_l' value='%.2f'>"
+        "<label>Camera end of the picture (0 = bottom, 1 = top)</label>"
+        "<input name='pen_flip_y' value='%.0f'>"
+        "<label>Nozzle X in the pen (cm)</label><input name='pen_nx' value='%.2f'>"
+        "<label>Nozzle Y in the pen (cm)</label><input name='pen_ny' value='%.2f'>"
+        "<label>Nozzle height above the floor (mm)</label>"
+        "<input name='pen_nh' value='%.1f'>"
+        "<label>Pan offset (deg)</label><input name='pen_po' value='%.2f'>"
+        "<label>Tilt offset (deg)</label><input name='pen_to' value='%.2f'>"
+        "<label>Pan direction (+1 or -1)</label><input name='pen_pd' value='%.0f'>"
+        "<label>Tilt direction (+1 or -1)</label><input name='pen_td' value='%.0f'>"
+        "<label>Pen path pan min</label><input name='pen_pmin' value='%.1f'>"
+        "<label>Pen path pan max</label><input name='pen_pmax' value='%.1f'>"
+        "<label>Pen path tilt min</label><input name='pen_tmin' value='%.1f'>"
+        "<label>Pen path tilt max</label><input name='pen_tmax' value='%.1f'>"
+        "<p>Check the aim against a measured spot: put something on the pen "
+        "floor at a known point and see where the nozzle points. If it aims "
+        "the wrong way, flip the direction above rather than guessing again.</p>"
         "<label>Servo pulse min (us)</label><input name='pulse_min' value='%u'>"
         "<label>Servo pulse max (us)</label><input name='pulse_max' value='%u'>"
         "<label>Water minimum %%</label><input name='water_min' value='%.1f'>"
@@ -574,6 +755,19 @@ static esp_err_t handler_setup(httpd_req_t *req)
         (double)c.nozzle_x, (double)c.nozzle_y, (double)c.nozzle_height,
         (double)c.pan_min, (double)c.pan_max,
         (double)c.tilt_min, (double)c.tilt_max,
+        /* The pen section, which comes before the pulse and water fields in
+         * the form above. */
+        c.pen.present ? " selected" : "",
+        c.pen.present ? "" : " selected",
+        pen_matrix,
+        (double)c.pen.width_cm, (double)c.pen.length_cm,
+        (double)c.pen.flip_y,
+        (double)c.pen.nozzle_x_cm, (double)c.pen.nozzle_y_cm,
+        (double)c.pen.nozzle_height_mm,
+        (double)c.pen.pan_offset_deg, (double)c.pen.tilt_offset_deg,
+        (double)c.pen.pan_dir, (double)c.pen.tilt_dir,
+        (double)c.pen.pan_min, (double)c.pen.pan_max,
+        (double)c.pen.tilt_min, (double)c.pen.tilt_max,
         (unsigned)c.servo_pulse_min_us, (unsigned)c.servo_pulse_max_us,
         (double)c.water_min_pct, (unsigned)c.spray_ms, (unsigned)c.cooldown_ms,
         c.relay_active_low ? " selected" : "",

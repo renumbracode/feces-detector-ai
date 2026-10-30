@@ -35,6 +35,9 @@ static const char *TAG = "act_cfg";
 #define K_FLOAT_SWITCH   "float_sw"
 #define K_WIFI_SSID      "wifi_ssid"
 #define K_WIFI_PASS      "wifi_pass"
+/* The pen calibration, as one blob: it is one thing, set and cleared
+ * together, and eight matrix numbers are too many to store one by one. */
+#define K_PEN_CAL        "pen_cal"
 
 void main_config_defaults(main_config_t *cfg)
 {
@@ -59,6 +62,36 @@ void main_config_defaults(main_config_t *cfg)
     cfg->pan_max = 90.0f;
     cfg->tilt_min = 0.0f;
     cfg->tilt_max = 90.0f;
+
+    /* The pen: 20 cm across, 30 cm along, with the sprayer over the far end
+     * pointing back down it.
+     *
+     * The camera looks straight down, so the picture IS the pen: every
+     * centimetre is the same size as every other one, and the board needs
+     * nothing but the pen's size to aim. `fitted` is false, so the LINEAR
+     * model applies. A fit to the picture is only needed if the camera is
+     * not square-on, and the dashboard can push one. */
+    memset(&cfg->pen, 0, sizeof(cfg->pen));
+    cfg->pen.present = true;
+    cfg->pen.fitted = false;
+    cfg->pen.width_cm = 20.0f;
+    cfg->pen.length_cm = 30.0f;
+    cfg->pen.flip_y = 0.0f;
+    cfg->pen.nozzle_x_cm = 10.0f;
+    cfg->pen.nozzle_y_cm = 30.0f;
+    /* The nozzle's height is what makes the travel cover the pen: too low
+     * and the far end of the pen is shallower than the servo's end stop. */
+    cfg->pen.nozzle_height_mm = 225.0f;
+    /* The travel's midpoint aims down the middle of the pen, and the far
+     * end of the travel points straight down. */
+    cfg->pen.pan_offset_deg = 35.0f;
+    cfg->pen.tilt_offset_deg = 35.0f;
+    cfg->pen.pan_dir = 1.0f;
+    cfg->pen.tilt_dir = 1.0f;
+    cfg->pen.pan_min = 0.0f;
+    cfg->pen.pan_max = 70.0f;
+    cfg->pen.tilt_min = 70.0f;
+    cfg->pen.tilt_max = 125.0f;
 
     cfg->servo_pulse_min_us = 500;
     cfg->servo_pulse_max_us = 2400;
@@ -117,6 +150,19 @@ void main_config_load(main_config_t *cfg)
     prv_get_f(h, K_PAN_MAX, &cfg->pan_max);
     prv_get_f(h, K_TILT_MIN, &cfg->tilt_min);
     prv_get_f(h, K_TILT_MAX, &cfg->tilt_max);
+
+    /* The pen calibration is one blob. A blob stored by an older build has a
+     * different shape, so the length is checked: reading one into the new
+     * struct would mix old fields into new ones. Anything that does not
+     * match leaves the defaults standing. */
+    {
+        pen_cal_t pen;
+        size_t len = sizeof(pen);
+        if (nvs_get_blob(h, K_PEN_CAL, &pen, &len) == ESP_OK
+            && len == sizeof(pen)) {
+            cfg->pen = pen;
+        }
+    }
     prv_get_u(h, K_PULSE_MIN, &cfg->servo_pulse_min_us);
     prv_get_u(h, K_PULSE_MAX, &cfg->servo_pulse_max_us);
     prv_get_f(h, K_WATER_MIN, &cfg->water_min_pct);
@@ -179,6 +225,7 @@ esp_err_t main_config_save(const main_config_t *cfg)
     nvs_set_u8(h, K_FLOAT_SWITCH, cfg->use_float_switch ? 1 : 0);
     nvs_set_str(h, K_WIFI_SSID, cfg->wifi_ssid);
     nvs_set_str(h, K_WIFI_PASS, cfg->wifi_pass);
+    nvs_set_blob(h, K_PEN_CAL, &cfg->pen, sizeof(cfg->pen));
 
     e = nvs_commit(h);
     nvs_close(h);
