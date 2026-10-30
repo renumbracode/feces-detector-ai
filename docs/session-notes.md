@@ -477,6 +477,44 @@ dashboard sends `rawurlencode()`d URLs (`Control.php:55`) and `POST /config`
 decodes them (`prv_get_decoded`) but `GET /target` does not. The stored
 value now reads back unencoded.
 
+### 2026-10-31: that decoding fix was NOT in the code, and the link was dead
+
+The note above says both URL bugs were fixed. **They were not** — the
+`GET /target` handler still used the raw `httpd_query_key_value`, so every
+push from the dashboard stored `http%3A%2F%2F...` again. The board was
+publishing to a string the HTTP client could not parse:
+
+```
+published: 717   failures: 716
+url: http%3A%2F%2F192.168.254.111%3A8080%2Ftarget
+```
+
+Two separate faults, and they are easy to confuse:
+
+1. **The URL was percent-encoded** (never decoded) *and* carried a stale
+   port. Fixed in the firmware: `GET /target` now uses the same
+   `prv_get_decoded` helper `POST /config` already used. The stored value
+   reads back unencoded, verified on the board.
+   A board whose NVS still holds the broken value can be repaired without
+   reflashing: `POST /config` decodes, so
+   `curl -X POST http://<camera>/config -d 'target_url=http%3A%2F%2F<host>%3A<port>%2Ftarget'`
+   stores it correctly (that POST reboots the board).
+2. **The board at .111 is not this repo's `esp32_main` firmware.** It
+   serves on **port 80**, has no `/config`, `/setup` or `/selftest`, and
+   answers `POST /target` with `{"ok":true,"ack":true,"cleaning":false}`
+   rather than `{"ok":true,"accepted":true,"pan":...}`. Its `/status` has a
+   different schema (`system`, `pump`, `cleaning`, `db`, `logs`) and it
+   polls the camera itself, so it already receives targets that way. Its
+   strings (`"Target received from camera"`, `"ack"`) appear nowhere in this
+   repository, so that firmware lives elsewhere.
+   The publisher now accepts `ack` as accepted too, and reports whether the
+   board sent angles at all (`lastAngles`) — otherwise the dashboard printed
+   "pan 0.0°" for a spray that had really happened.
+
+So the URL in `settings.target_url` must match the port the deployed board
+actually serves (**80** for the board that is running now, **8080** for this
+repo's `esp32_main`). It is a setting; nothing else depends on it.
+
 ## Laptop-side services (do not survive a reboot)
 
 **Verifier** — start it first, every session:

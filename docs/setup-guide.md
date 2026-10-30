@@ -409,7 +409,60 @@ then the calibration:
 
 The page says so too; it is the same list.
 
-### 8.3 Check the geometry before anything moves
+### 8.3 The pen — the model to use for this rig
+
+The camera looks **straight down** at the pigpen, so the pen appears in the
+picture as a **rectangle** and every centimetre is the same size as every other
+one. The picture therefore *is* the pen: a position in the picture converts to
+centimetres with nothing more than the pen's size.
+
+That is the whole calibration:
+
+- `pen_width_cm` — across the pen (20 cm here)
+- `pen_length_cm` — along the pen (30 cm here)
+- `pen_flip_y` — which end of the picture the camera is at. The picture's
+  **bottom** is the pen's near end by default; flip it if the camera is
+  mounted the other way round.
+
+Set them on the dashboard's **Control** page. The live view then shows
+**centimetres** instead of percentages, and the history table records each
+detection's position on the pen in centimetres.
+
+**If the picture does not show exactly the pen**, the centimetres are scaled
+wrong — the gridlines will miss the pen's edges, and you will see it at once.
+Then fit the picture instead:
+
+1. Open **Live view**, then **Fine-tune the pen**.
+2. Click the pen's four corners in order: **near-left, near-right, far-right,
+   far-left**. *Near* is the end closest to the camera — the bottom of the
+   picture. A rough click is fine: the sides are re-found on the picture itself.
+3. Check the preview, then **Save**.
+
+That fits a **homography** to the picture, which is exact for any camera
+angle, including a tilted one.
+
+**Then tell the sprayer about it.** The board that owns the servos does the
+aiming, and it never sees the picture, so it needs the pen's size (and the fit,
+if there is one). Press **Send to the actuator board**.
+
+On the board's own `/setup` page, set the pen section:
+
+- `pen_w`, `pen_l` — the pen's size, in cm
+- `pen_flip_y` — which end of the picture the camera is at (0 = bottom)
+- `pen_nx`, `pen_ny` — the nozzle's position **in the pen frame**: across the
+  pen from the near-left corner, and along it. The nozzle sits over the far
+  end, so `pen_ny` is the pen's length.
+- `pen_nh` — the nozzle's height above the pen floor, in mm. This is the
+  number that decides whether the travel covers the pen: too low and the far
+  end is shallower than the servo's end stop.
+- `pen_po`, `pen_to` — where the servo's own zero is. The defaults aim the
+  travel's midpoint down the middle of the pen and its far end straight down.
+- `pen_pd`, `pen_td` — the **direction** flags, `+1` or `-1`. The nozzle faces
+  back toward the camera, so the picture's left is the servo's *right*: if the
+  nozzle aims sideways, flip `pen_pd` rather than guessing again.
+- `pen_pmin/max`, `pen_tmin/max` — the servo's travel in its own numbering.
+
+### 8.4 Check the geometry before anything moves
 
 ```bash
 curl http://<main-board-ip>:8080/selftest
@@ -421,7 +474,7 @@ the message says which check failed. This is the first thing to run when the
 nozzle aims somewhere unexpected: it separates "the maths is wrong" from "the
 measured numbers are wrong".
 
-### 8.4 Point the camera board at the main board
+### 8.5 Point the camera board at the main board
 
 From the dashboard: **Control → Actuator board (main ESP32)**, enter the URL
 and switch publishing on. That is applied to the camera board **immediately,
@@ -433,7 +486,7 @@ Or by hand:
 curl "http://<camera-board-ip>/target?url=http://<main-ip>:8080/target&enable=1"
 ```
 
-### 8.5 Switch the camera board's own pump OFF
+### 8.6 Switch the camera board's own pump OFF
 
 **This is not optional.** The camera board keeps its own relay and its own
 local spray path (it is left unchanged so it can be reused for something
@@ -448,7 +501,7 @@ The camera board then still detects, still alerts, still logs and still
 publishes — it just refuses to energise its own relay. The same switch is on
 the Control page and on the board's `/setup` page.
 
-### 8.6 The staged test procedure
+### 8.7 The staged test procedure
 
 Work through these in order. **Do not connect the water until step 5.**
 
@@ -503,19 +556,26 @@ published → angles computed → nozzle aimed → pump runs → cooldown. The l
 view's *Actuator board* panel shows the outcome of the last dispatch, and
 says **why** if it was refused.
 
-### 8.7 If the nozzle aims the wrong way
+### 8.8 If the nozzle aims the wrong way
 
 In order, because the causes are easy to confuse:
 
 1. `GET /selftest` on the main board — is the solver itself right?
-2. Is the yaw convention right? A **positive** yaw turns the camera's +Y
+2. **Is the pen calibration in use?** `GET /config` shows `"pen":{"present":…}`.
+   With it present the board aims from the pen's centimetres; without it, it
+   falls back to the camera-pose model, which expects a camera looking down
+   at the pen from above.
+3. **Is the direction flag right?** The nozzle faces back toward the camera,
+   so the picture's left is the servo's *right*. If the nozzle aims sideways,
+   flip `pen_pd` (or `pen_td` for the tilt axis) on the board's `/setup` page.
+4. Is the yaw convention right? A **positive** yaw turns the camera's +Y
    direction toward **−X** (right-hand rule about +Z). The nozzle's pan is
    the other way round: pan 0 aims at +Y, positive pan aims at +X.
-3. Is the pitch sign right? `cam_pitch` is positive when the camera looks
+5. Is the pitch sign right? `cam_pitch` is positive when the camera looks
    **down**.
-4. Is `cam_height` the height above the **pen floor**, not above the
+6. Is `cam_height` the height above the **pen floor**, not above the
    nozzle?
-5. Is `focal_px` right? A quick check: `focal_px = frame_width / (2 × tan(hfov/2))`.
+7. Is `focal_px` right? A quick check: `focal_px = frame_width / (2 × tan(hfov/2))`.
 
 ## Troubleshooting
 
@@ -536,8 +596,9 @@ In order, because the causes are easy to confuse:
 | Database "table not found" | Run `dashboard/database.sql` import |
 | Sprays nonstop | Threshold too low; raise it on the device |
 | Main board gets no coordinates | The two boards are on different networks, or `target_url` is wrong. Check `GET /status` on the camera board: `target.published` counts what it sent and `target.failures` counts what did not arrive |
-| Camera board sprays AND the main board sprays | The camera board's own pump is still on. `POST /config -d 'spray_enabled=0'` on the camera board (see §8.5) |
-| Nozzle aims the wrong way | Work through §8.7 in order — `GET /selftest` first |
+| Camera board sprays AND the main board sprays | The camera board's own pump is still on. `POST /config -d 'spray_enabled=0'` on the camera board (see §8.6) |
+| Nozzle aims the wrong way | Work through §8.8 in order — `GET /selftest` first |
+| Live view grid shows percentages, not centimetres | The pen is not calibrated: **Live view → Calibrate pen**, click the four corners, save. Changing the pen's size on the Control page clears the calibration, because the fit was made for a particular size |
 | Pump refused with `low_water` | Working as intended. Check `water_min` and the sensor's raw value in `GET /status` |
 | Pump runs but nothing comes out | The pump's supply is separate and its own; check the hose and the relay's `NO` contact |
 | Does not build | Install ESP-IDF v5.x, run `idf.py set-target esp32s3` |

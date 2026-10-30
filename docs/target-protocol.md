@@ -200,6 +200,66 @@ editable over `POST /config`:
 (or `hfov_deg`), `nozzle_x`, `nozzle_y`, `nozzle_height`, `pan_min`, `pan_max`,
 `tilt_min`, `tilt_max`, `water_min_pct`.
 
+### 6.1 The pen model — the model this rig uses
+
+The camera looks **straight down** at the pen, so the pen appears in the
+picture as a rectangle and every centimetre is the same size as every other
+one. The picture **is** the pen, and the mapping needs nothing but the pen's
+size:
+
+```
+pen frame     X = across the pen, cm, 0 at the near-left corner as the
+              camera sees it
+              Y = along the pen, cm, 0 at the camera's end
+
+picture       u = X / width                 (the picture's left is the pen's left)
+              v = 1 - Y / length            (the picture's BOTTOM is the pen's
+                                             near end; flip if the camera is
+                                             mounted the other way round)
+```
+
+Written as a homography — which is what the code stores and applies — that is
+
+```
+H = [ 1/W,   0,    0,
+      0,   -1/L,   1,
+      0,    0,    0 ]
+```
+
+which is affine, so the same code that fits a perspective handles it with no
+special case anywhere downstream.
+
+**When the camera is not square-on**, the picture is a trapezoid and one scale
+factor cannot describe it. Then a **homography fitted to the picture** is used
+instead: four point correspondences (the pen's four corners) fit it exactly,
+and it is stored in the same eight numbers. The dashboard's live view fits it —
+**Fine-tune the pen** — and pushes it to the board:
+
+```
+pen_ok        1 to use the pen model
+pen_w, pen_l  the pen's size in cm
+pen_flip_y    1 when the camera is at the top of the picture
+pen_h         the eight numbers, comma separated -- only when the picture has
+              been fitted; without it the board uses the plain model
+```
+
+The board's own `pen_nx`, `pen_ny`, `pen_nh`, `pen_po`, `pen_to`, `pen_pd`,
+`pen_td`, `pen_pmin`, `pen_pmax`, `pen_tmin`, `pen_tmax` are the physical
+facts of the rig, and stay where the operator set them. A matrix that cannot
+be inverted — four points in a line — is refused rather than stored.
+
+The nozzle faces **back** toward the camera, so its forward direction is −Y,
+and the aim is computed in the pen frame:
+
+```
+fwd = nozzle_y - Y
+lat = X - nozzle_x
+tilt = tilt_offset + tilt_dir * atan2(nozzle_height, 10*hypot(lat, fwd))
+pan  = pan_offset - pan_dir * atan2(lat, fwd)
+```
+
+clamped to the servo's travel in the servo's own numbering.
+
 ---
 
 ## 7. Commissioning note — the double-spray hazard
