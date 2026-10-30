@@ -172,6 +172,7 @@ static void prv_send(target_msg_t *msg)
 
     bool ok = false;
     bool accepted = false;
+    bool have_angles = false;
     char reason[24] = "";
     float pan = 0.0f, tilt = 0.0f;
 
@@ -185,10 +186,20 @@ static void prv_send(target_msg_t *msg)
                      s_status.url, status, (long long)took);
         } else {
             ok = true;
-            prv_json_bool(reply, "accepted", &accepted);
+            /* The board may answer with this repo's "accepted", or with the
+             * older "ack" that the deployed board uses. Both mean it took
+             * the message. The fallback only happens when "accepted" is
+             * ABSENT -- a board that says accepted:false has refused, and
+             * must not be second-guessed. */
+            if (!prv_json_bool(reply, "accepted", &accepted)) {
+                prv_json_bool(reply, "ack", &accepted);
+            }
             prv_json_str(reply, "reason", reason, sizeof(reason));
-            prv_json_float(reply, "pan", &pan);
-            prv_json_float(reply, "tilt", &tilt);
+            /* The angles are only reported by a board that works them out
+             * itself; one that aims internally sends none, and the dashboard
+             * must not print "pan 0.0" for a spray that really happened. */
+            have_angles = prv_json_float(reply, "pan", &pan)
+                       && prv_json_float(reply, "tilt", &tilt);
             ESP_LOGI(TAG, "detection %u -> accepted=%d reason=%s pan=%.1f tilt=%.1f "
                           "(%d boxes, %s, took %lld ms)",
                      (unsigned)msg->detection_id, (int)accepted,
@@ -206,6 +217,7 @@ static void prv_send(target_msg_t *msg)
              msg->source);
     s_status.last_pan = pan;
     s_status.last_tilt = tilt;
+    s_status.last_angles = have_angles;
     s_status.last_detection_id = msg->detection_id;
     if (ok) {
         s_last_ok_at_ms = esp_timer_get_time() / 1000;

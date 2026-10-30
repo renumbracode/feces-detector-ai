@@ -42,6 +42,10 @@ static const char *TAG = "http_svc";
 #define STREAM_BOUNDARY "fomodetectboundary"
 #define STREAM_PART "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n"
 
+/* Defined further down, next to the other body-parsing helpers. */
+static bool prv_get_decoded(const char *body, const char *key,
+                            char *out, size_t out_size);
+
 /* Stream pacing bounds. The interval is the delay AFTER a frame is sent, so it
  * adds to the send time rather than replacing it.
  *
@@ -229,7 +233,7 @@ static esp_err_t handler_status(httpd_req_t *req)
     snprintf(target_json, sizeof(target_json),
              "{\"enabled\":%s,\"url\":\"%s\",\"lastOk\":%s,"
              "\"lastAccepted\":%s,\"lastReason\":\"%s\",\"source\":\"%s\","
-             "\"lastPan\":%.1f,\"lastTilt\":%.1f,\"lastDetectionId\":%u,"
+             "\"lastPan\":%.1f,\"lastTilt\":%.1f,\"lastAngles\":%s,\"lastDetectionId\":%u,"
              "\"lastOkAgeMs\":%llu,\"failures\":%u,\"published\":%u,\"dropped\":%u}",
              tp.enabled ? "true" : "false",
              tp_url,
@@ -238,6 +242,7 @@ static esp_err_t handler_status(httpd_req_t *req)
              tp.last_reason,
              tp.last_source,
              (double)tp.last_pan, (double)tp.last_tilt,
+             tp.last_angles ? "true" : "false",
              (unsigned)tp.last_detection_id,
              tp.last_ok_age_ms == UINT64_MAX
                  ? (unsigned long long)-1
@@ -330,7 +335,12 @@ static esp_err_t handler_target(httpd_req_t *req)
     bool changed = false;
 
     char url[129] = "";
-    if (httpd_query_key_value(buf, "url", url, sizeof(url)) == ESP_OK) {
+    /* The URL arrives percent-encoded, because the dashboard sends it as a
+     * query value. httpd_query_key_value() copies the RAW bytes, so reading
+     * it that way stored "http%3A%2F%2F..." -- a string the HTTP client
+     * cannot parse, which is why every publish failed with "Error parse url".
+     * The same helper POST /config uses decodes it properly. */
+    if (prv_get_decoded(buf, "url", url, sizeof(url))) {
         /* Same sanitising as POST /config: the URL is echoed inside the
          * /status JSON, so a quote or backslash would break every consumer
          * of that document. */
@@ -510,8 +520,12 @@ static bool prv_get_decoded(const char *body, const char *key,
         ESP_LOGW(TAG, "%s too long after decoding, ignored", key);
         return false;
     }
-    strncpy(out, raw, out_size - 1);
-    out[out_size - 1] = '\0';
+    /* A plain copy of the exact length, rather than strncpy: the decoded
+     * string is known to fit (it was checked above), and strncpy's padding
+     * invites a truncation warning for every caller with a smaller buffer
+     * than this one's. */
+    size_t n = strlen(raw);
+    memcpy(out, raw, n + 1);
     return true;
 }
 

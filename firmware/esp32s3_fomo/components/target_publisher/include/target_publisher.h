@@ -41,6 +41,10 @@ typedef struct {
     char     last_reason[24];    /* refusal reason, "" when accepted */
     char     last_source[8];     /* which model produced the boxes */
     float    last_pan, last_tilt; /* servo angles the main board computed */
+    bool     last_angles;        /* the board reported angles at all -- one
+                                  * that aims internally sends none, and the
+                                  * dashboard must not print "pan 0.0" for a
+                                  * spray that really happened */
     uint32_t last_detection_id;
     uint64_t last_ok_age_ms;     /* ms since the last completed POST */
     uint32_t failures;           /* consecutive failed POSTs */
